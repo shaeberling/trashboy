@@ -4,7 +4,6 @@ static const char *LVGL_TAG = "LVGL";
 lv_disp_draw_buf_t disp_buf; // contains internal graphic buffer(s) called draw buffer(s)
 lv_disp_drv_t disp_drv;      // contains callback functions
 
-lv_indev_drv_t indev_drv;
 esp_timer_handle_t lvgl_tick_timer = NULL;
 
 
@@ -34,22 +33,6 @@ void example_increase_lvgl_tick(void *arg)
     lv_tick_inc(EXAMPLE_LVGL_TICK_PERIOD_MS);
 }
 
-/*Read the touchpad*/
-void example_touchpad_read( lv_indev_drv_t * drv, lv_indev_data_t * data )
-{
-
-  if (Simulated_touch_data.points != 0x00) {
-    data->point.x = Simulated_touch_data.x;
-    data->point.y = Simulated_touch_data.y;
-    data->state = LV_INDEV_STATE_PR;
-    // printf("LVGL : X=%u Y=%u points=%d\r\n",  Simulated_touch_data.x , Simulated_touch_data.y,Simulated_touch_data.points);
-  } else {
-    data->state = LV_INDEV_STATE_REL;
-  }
-  Simulated_touch_data.x = 0;
-  Simulated_touch_data.y = 0;
-  Simulated_touch_data.points = 0;
-}
 void LVGL_Init(void)
 {
     ESP_LOGI(LVGL_TAG, "Initialize LVGL library");
@@ -87,14 +70,6 @@ void LVGL_Init(void)
         .callback = &example_increase_lvgl_tick,
         .name = "lvgl_tick"
     };
-
-    /********************* LVGL *********************/
-    ESP_LOGI(LVGL_TAG,"Register display indev to LVGL");
-    lv_indev_drv_init ( &indev_drv );
-    indev_drv.type = LV_INDEV_TYPE_POINTER;
-    indev_drv.disp = disp;
-    indev_drv.read_cb = example_touchpad_read;
-    lv_indev_drv_register( &indev_drv );
 
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, EXAMPLE_LVGL_TICK_PERIOD_MS * 1000));
