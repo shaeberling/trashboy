@@ -4,14 +4,15 @@ dependencies:
       type: idf
     version: 5.5.2
   lvgl/lvgl:
+    component_hash: 2a8f619b5c2b1c7ad116c33d43dae8989c76739068f406a7e8ba9221e1085f17
     dependencies: []
     source:
-      path: /home/arno/git/ESP32-S3-LCD-2.8B-Test/components/lvgl__lvgl
-      type: local
-    version: 8.2.0
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 9.1.0
 direct_dependencies:
 - idf
 - lvgl/lvgl
-manifest_hash: 7bf1fb2108074131d59b17ccc7087a480d4e6f0c05824312faeffc8b6bc2915d
+manifest_hash: 6c997f22cf03b772c2a8f5dffb9933cf5cd481e86b3db7015fb8f5827ae0be87
 target: esp32s3
 version: 2.0.0

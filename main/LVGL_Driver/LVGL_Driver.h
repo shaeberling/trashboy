@@ -11,10 +11,8 @@
 
 #define EXAMPLE_LVGL_TICK_PERIOD_MS    2
 
-extern lv_disp_draw_buf_t disp_buf; // contains internal graphic buffer(s) called draw buffer(s)
-extern lv_disp_drv_t disp_drv;      // contains callback functions
-extern lv_disp_t *disp;
-void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map);
+extern lv_display_t *disp;
+void example_lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map);
 void example_increase_lvgl_tick(void *arg);
 
 void LVGL_Init(void);

@@ -1,19 +1,17 @@
 #include "LVGL_Driver.h"
+#include <esp_heap_caps.h>
 
-static const char *LVGL_TAG = "LVGL";   
-lv_disp_draw_buf_t disp_buf; // contains internal graphic buffer(s) called draw buffer(s)
-lv_disp_drv_t disp_drv;      // contains callback functions
+static const char *LVGL_TAG = "LVGL";
+lv_display_t *disp = NULL;
 
 esp_timer_handle_t lvgl_tick_timer = NULL;
 
-
 static void *buf1 = NULL;
-static void *buf2 = NULL;             
+static void *buf2 = NULL;
 
-
-void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
+void example_lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
-    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) drv->user_data;
+    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) lv_display_get_user_data(disp);
     int offsetx1 = area->x1;
     int offsetx2 = area->x2;
     int offsety1 = area->y1;
@@ -23,8 +21,8 @@ void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t
     xSemaphoreTake(sem_vsync_end, portMAX_DELAY);
 #endif
     // pass the draw buffer to the driver
-    esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
-    lv_disp_flush_ready(drv);
+    esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map);
+    lv_display_flush_ready(disp);
 }
 
 void example_increase_lvgl_tick(void *arg)
@@ -37,32 +35,54 @@ void LVGL_Init(void)
 {
     ESP_LOGI(LVGL_TAG, "Initialize LVGL library");
     lv_init();
-#if CONFIG_EXAMPLE_DOUBLE_FB
-    ESP_LOGI(LVGL_TAG, "Use frame buffers as LVGL draw buffers");
-    ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel_handle, 2, &buf1, &buf2));
-    // initialize LVGL draw buffers
-    lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES);
-#else
-    ESP_LOGI(LVGL_TAG, "Allocate separate LVGL draw buffers from PSRAM");
-    buf1 = heap_caps_malloc(EXAMPLE_LCD_H_RES  * EXAMPLE_LCD_V_RES, MALLOC_CAP_SPIRAM);
-    assert(buf1);
-    buf2 = heap_caps_malloc(EXAMPLE_LCD_H_RES  * EXAMPLE_LCD_V_RES, MALLOC_CAP_SPIRAM);
-    assert(buf2);
-    // initialize LVGL draw buffers
-    lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES);
-#endif // CONFIG_EXAMPLE_DOUBLE_FB
 
-    ESP_LOGI(LVGL_TAG, "Register display driver to LVGL");
-    lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res = EXAMPLE_LCD_H_RES;
-    disp_drv.ver_res = EXAMPLE_LCD_V_RES;
-    disp_drv.flush_cb = example_lvgl_flush_cb;
-    disp_drv.draw_buf = &disp_buf;
-    disp_drv.user_data = panel_handle;
+    // Create a display
+    ESP_LOGI(LVGL_TAG, "Create display");
+    disp = lv_display_create(EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
+    if (disp == NULL) {
+        ESP_LOGE(LVGL_TAG, "Failed to create display");
+        return;
+    }
+
+    // Allocate buffers
+    ESP_LOGI(LVGL_TAG, "Allocate buffers from PSRAM");
+    // RGB565 uses 2 bytes per pixel
+    uint32_t buf_size = EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES * 2;
+    buf1 = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+    if (buf1 == NULL) {
+        ESP_LOGE(LVGL_TAG, "Failed to allocate buffer 1");
+        return;
+    }
 #if CONFIG_EXAMPLE_DOUBLE_FB
-    disp_drv.full_refresh = true; // the full_refresh mode can maintain the synchronization between the two frame buffers
+    buf2 = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+    if (buf2 == NULL) {
+        ESP_LOGE(LVGL_TAG, "Failed to allocate buffer 2");
+        return;
+    }
+#else
+    buf2 = NULL;
 #endif
-    lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
+
+    // Set buffers for the display
+    ESP_LOGI(LVGL_TAG, "Set display buffers");
+#if CONFIG_EXAMPLE_DOUBLE_FB
+    lv_display_set_buffers(disp, buf1, buf2, buf_size, LV_DISPLAY_RENDER_MODE_DIRECT);
+#else
+    lv_display_set_buffers(disp, buf1, buf2, buf_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
+#endif
+
+    // Set color format (RGB565)
+    lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
+
+    // Set the flush callback
+    ESP_LOGI(LVGL_TAG, "Register display driver");
+    lv_display_set_flush_cb(disp, example_lvgl_flush_cb);
+
+    // Store panel handle in display user data
+    lv_display_set_user_data(disp, (void *)panel_handle);
+
+    // Set display as default
+    lv_display_set_default(disp);
 
     ESP_LOGI(LVGL_TAG, "Install LVGL tick timer");
     // Tick interface for LVGL (using esp_timer to generate 2ms periodic event)
@@ -73,5 +93,4 @@ void LVGL_Init(void)
 
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, EXAMPLE_LVGL_TICK_PERIOD_MS * 1000));
-
 }

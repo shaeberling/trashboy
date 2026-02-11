@@ -1,5 +1,5 @@
 idf_component_register(
-                        SRCS  "main.c" 
+                        SRCS  "main.cpp" 
                               "EXIO/TCA9554PWR.c"
                               "LCD_Driver/ST7701S.c" 
                               "LVGL_Driver/LVGL_Driver.c"

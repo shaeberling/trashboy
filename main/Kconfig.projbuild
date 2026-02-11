@@ -57,8 +57,10 @@ menu "Example Configuration"
     config LV_FONT_MONTSERRAT_16
         bool "Enable Montserrat 16"
         default y if !LV_CONF_MINIMAL
-        
 
+    config LV_FONT_MONTSERRAT_24
+        bool "Enable Montserrat 24"
+        default y if !LV_CONF_MINIMAL
 
     config BT_ENABLED
         bool "Select this option to enable Bluetooth"

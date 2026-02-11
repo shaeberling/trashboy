@@ -290,7 +290,7 @@ void LCD_Init(void)
     esp_lcd_rgb_panel_event_callbacks_t cbs = {
         .on_vsync = example_on_vsync_event,
     };
-    ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &cbs, &disp_drv));
+    ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &cbs, NULL));
 
     ESP_LOGI(LCD_TAG, "Initialize RGB LCD panel");
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
@@ -332,7 +332,7 @@ void Backlight_Init(void)
 
 void Set_Backlight(uint8_t Light)
 {
-  if(Light > Backlight_MAX || Light < 0)
+  if(Light > Backlight_MAX)
     printf("Set Backlight parameters in the range of 0 to 100 \r\n");
   else{
     ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, Light*(8192/100)));    // Set duty
