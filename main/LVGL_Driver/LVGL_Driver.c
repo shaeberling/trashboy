@@ -66,7 +66,7 @@ void LVGL_Init(void)
     // Set buffers for the display
     ESP_LOGI(LVGL_TAG, "Set display buffers");
 #if CONFIG_EXAMPLE_DOUBLE_FB
-    lv_display_set_buffers(disp, buf1, buf2, buf_size, LV_DISPLAY_RENDER_MODE_DIRECT);
+    lv_display_set_buffers(disp, buf1, buf2, buf_size, LV_DISPLAY_RENDER_MODE_FULL);
 #else
     lv_display_set_buffers(disp, buf1, buf2, buf_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
 #endif
@@ -83,6 +83,9 @@ void LVGL_Init(void)
 
     // Set display as default
     lv_display_set_default(disp);
+
+    // Set display rotation to landscape
+    //lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_90);
 
     ESP_LOGI(LVGL_TAG, "Install LVGL tick timer");
     // Tick interface for LVGL (using esp_timer to generate 2ms periodic event)
