@@ -207,24 +207,6 @@ int ScreenBuffer::isExpandedMode()
   return (currentMonitorMode & MODE_EXPANDED) != 0;
 }
 
-static void draw_glyph_to_canvas(lv_obj_t *target, lv_coord_t x, lv_coord_t y, uint8_t glyph,
-                                 lv_color_t fg, lv_color_t bg)
-{
-    const unsigned char *glyph_data = &font_m3[glyph * TRS_M3_CHAR_HEIGHT];
-    for (int row = 0; row < TRS_M3_CHAR_HEIGHT; row++) {
-        uint8_t bits = glyph_data[row];
-        for (int col = 0; col < TRS_M3_CHAR_WIDTH; col++) {
-            bool on = (bits & (0x80 >> col)) != 0;
-            lv_coord_t px = x + col;
-            lv_coord_t py = y + row;
-            // Rotate 90 degrees clockwise: (px, py) -> (py, canvas_height - 1 - px)
-            lv_coord_t rotated_px = py;
-            lv_coord_t rotated_py = 640 /*canvas_height*/ - 1 - px;
-            lv_canvas_set_px(target, rotated_px, rotated_py, on ? fg : bg, LV_OPA_COVER);
-        }
-    }
-}
-
 void ScreenBuffer::drawChar(uint16_t pos, uint8_t character)
 {
   if (pos >= screen_chars) {
@@ -253,11 +235,6 @@ void ScreenBuffer::drawChar(uint16_t pos, uint8_t character)
     isPaintingInverse = false;
   }
 #endif
-#if 0
-  xSemaphoreTake(lvgl_mutex, portMAX_DELAY);
-  draw_glyph_to_canvas(canvas, pos_x, pos_y, character, lv_color_white(), lv_color_black());
-  xSemaphoreGive(lvgl_mutex);
-#endif
 }
 
 bool ScreenBuffer::getChar(uint16_t pos, uint8_t& character)
@@ -270,6 +247,11 @@ bool ScreenBuffer::getChar(uint16_t pos, uint8_t& character)
 }
 
 //----------------------------------------------------------------
+
+static const lv_color_t screen_lv_colors[] = {
+  LV_COLOR_MAKE(225, 225, 255), // White
+  LV_COLOR_MAKE(51, 255, 51),   // Green
+  LV_COLOR_MAKE(255, 177, 0)};  // Amber
 
 TRSScreen::TRSScreen()
 {
@@ -286,15 +268,15 @@ void TRSScreen::init()
 
 #if 1
   // RGB565 format: 2 bytes per pixel
-  size_t buf_size = canvasWidth * canvasHeight * sizeof(lv_color_t);
-  canvas_buf = (lv_color_t*) heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  size_t buf_size = canvasWidth * canvasHeight * sizeof(lv_color16_t);
+  canvas_buf = (lv_color16_t*) heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   assert(canvas_buf);
 
   canvas = lv_canvas_create(lv_scr_act());
   lv_canvas_set_buffer(canvas, canvas_buf, canvasWidth, canvasHeight, LV_COLOR_FORMAT_RGB565);
   lv_canvas_fill_bg(canvas, lv_color_black(), LV_OPA_COVER);
   lv_obj_clear_flag(canvas, LV_OBJ_FLAG_SCROLLABLE);
-  trsCanvas = new TRSCanvas(canvas_buf, canvasWidth, canvasHeight, font_m3, TRS_M3_CHAR_WIDTH, TRS_M3_CHAR_HEIGHT, lv_color_white(), lv_color_black());
+  trsCanvas = new TRSCanvas(canvas_buf, canvasWidth, canvasHeight, font_m3, TRS_M3_CHAR_WIDTH, TRS_M3_CHAR_HEIGHT, screen_lv_colors[1], lv_color_black());
 #endif
 }
 
@@ -413,7 +395,6 @@ void TRSScreen::render()
 
   // Track one combined dirty rectangle (in pixel coords) to minimize invalidate calls
   bool any_dirty = false;
-  lv_coord_t dirty_x0 = canvasWidth, dirty_y0 = canvasHeight, dirty_x1 = 0, dirty_y1 = 0;
 
   uint8_t width = top->getWidth();
   uint8_t height = top->getHeight();
@@ -430,51 +411,12 @@ void TRSScreen::render()
     int cx = i % width;
     int cy = i / width;
 
-#if 0
-   trsCanvas->blit_glyph_to_canvas(newv, cx, cy);
-#else
-    int pos_x = (i % width) * char_width;
-  int pos_y = (i / width) * char_height;
-  //printf("Drawing char '%c' at (%d, %d)\n", newv, pos_x, pos_y);
-draw_glyph_to_canvas(canvas, pos_x, pos_y, newv, lv_color_white(), lv_color_black());
-#endif
-
-    // expand dirty bounds in pixels
-    lv_coord_t px0 = cx * char_width;
-    lv_coord_t py0 = cy * char_height;
-    lv_coord_t px1 = px0 + char_width - 1;
-    lv_coord_t py1 = py0 + char_height - 1;
-
-    if (!any_dirty) {
-        dirty_x0 = px0; dirty_y0 = py0;
-        dirty_x1 = px1; dirty_y1 = py1;
-        any_dirty = true;
-    } else {
-        if (px0 < dirty_x0) dirty_x0 = px0;
-        if (py0 < dirty_y0) dirty_y0 = py0;
-        if (px1 > dirty_x1) dirty_x1 = px1;
-        if (py1 > dirty_y1) dirty_y1 = py1;
-    }
+    trsCanvas->blit_glyph_to_canvas(newv, cx, cy);
+    any_dirty = true;
   }
 
   if (any_dirty) {
-      lv_area_t a = {
-          .x1 = dirty_x0,
-          .y1 = dirty_y0,
-          .x2 = dirty_x1,
-          .y2 = dirty_y1
-      };
-
-      // Invalidate only the changed region.
-      // If your LVGL v8 build doesn't have lv_obj_invalidate_area,
-      // fall back to lv_obj_invalidate(canvas).
-      //printf("Invalidating area: (%d,%d) - (%d,%d)\n", a.x1, a.y1, a.x2, a.y2);
-      //XXX need to rotate coordinates... lv_obj_invalidate_area(canvas, &a);
-      
-        // For image widget, signal that the source has changed
-        //lv_img_set_src(canvas, &img_dsc);
-        //  lv_img_cache_invalidate_src(&img_dsc);
-        lv_obj_invalidate(canvas);
+    lv_obj_invalidate(canvas);
   }
 }
 
