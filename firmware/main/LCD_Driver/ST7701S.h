@@ -12,6 +12,10 @@
 #include "TCA9554PWR.h"
 #include "LVGL_Driver.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define SPI_METHOD 1
 #define IOEXPANDER_METHOD 0
 
@@ -25,7 +29,7 @@
 #define EXAMPLE_LCD_V_RES              640
 #define EXAMPLE_LCD_H_RES              480
 
-#define EXAMPLE_LCD_PIXEL_CLOCK_HZ     (17 * 1000 * 1000)
+#define EXAMPLE_LCD_PIXEL_CLOCK_HZ     (8 * 1000 * 1000)
 #define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL  1
 #define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
 #define EXAMPLE_PIN_NUM_BK_LIGHT       6
@@ -103,3 +107,7 @@ void LCD_Init(void);
 /********************* BackLight *********************/
 void Backlight_Init(void);
 void Set_Backlight(uint8_t Light);
+
+#ifdef __cplusplus
+}
+#endif

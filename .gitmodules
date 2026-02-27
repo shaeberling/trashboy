@@ -1,0 +1,6 @@
+[submodule "firmware/components/TRS-IO"]
+	path = firmware/components/TRS-IO
+	url = https://github.com/apuder/TRS-IO.git
+[submodule "firmware/components/trs-io/TRS-IO"]
+	path = firmware/components/trs-io/TRS-IO
+	url = https://github.com/apuder/TRS-IO.git

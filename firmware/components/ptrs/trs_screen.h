@@ -186,12 +186,15 @@ private:
   lv_coord_t canvasHeight;
   uint8_t* prevScreenBuffer;
   TRSCanvas* trsCanvas;
+  SemaphoreHandle_t mutex;
 
 public:
   TRSScreen();
   void init();
+  void createCanvas();
   void push(ScreenBuffer* screenBuffer);
   void pop();
+  ScreenBuffer* getTop() { return top; }
   void setMode(uint8_t mode);
   uint8_t getMode();
   uint8_t getWidth();

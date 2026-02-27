@@ -1,8 +1,9 @@
 
 #include "z80.h"
 #include "trs_screen.h"
-//#include "trs_memory.h"
+#include "trs_memory.h"
 #include "trs.h"
+#include "io.h"
 #include <freertos/task.h>
 #include <unistd.h>
 #include <time.h>
@@ -17,12 +18,13 @@
 static unsigned int cycles_per_timer = CYCLES_PER_TIMER_M3;
 static unsigned int timer_hz = TIMER_HZ_M3;
 
-static SemaphoreHandle_t lvgl_mutex;
 
-int trs_model = 4;
+int trs_model = 3;
 
+static volatile bool z80_paused = false;
 static Z80Context z80ctx;
 
+#if 0
 static unsigned char* mem = NULL;
 
 extern const uint8_t cosmic_cmd_start[] asm("_binary_COSMIC_CMD_start");
@@ -95,6 +97,7 @@ uint16_t mem_init()
   //z80_reset(entry_addr);
   return entry_addr;
 }
+#endif
 
 void trs_timer_speed(int fast)
 {
@@ -105,17 +108,12 @@ void trs_timer_speed(int fast)
 
 void poke_mem(uint16_t address, uint8_t data)
 {
-  //mem_write(address, data);
-  if (address >= 0x3c00 && address < 0x4000) {
-    trs_screen.drawChar(address - 0x3c00, data);
-  }
-  mem[address] = data;
+  mem_write(address, data);
 }
 
 uint8_t peek_mem(uint16_t address)
 {
-  //return mem_read(address);
-  return mem[address];
+  return mem_read(address);
 }
 
 //------------------------------------------------------------------
@@ -134,18 +132,12 @@ void z80_mem_write(int param, ushort address, byte data)
 
 static byte z80_io_read(int param, ushort address)
 {
-#if 0
-    printf("in(0x%02x)\n", address);
-#endif
-  return 0xff;// z80_in(address & 0xff, total_tstate_count);
+  return z80_in(address & 0xff, total_tstate_count);
 }
 
 static void z80_io_write(int param, ushort address, byte data)
 {
-#if 0
-  printf("out(0x%02x): 0x%02x\n", address, data);
-#endif
-  //z80_out(address & 0xff, data, total_tstate_count);
+  z80_out(address & 0xff, data, total_tstate_count);
 }
 
 static int get_ticks()
@@ -188,7 +180,7 @@ static void sync_time_with_host()
 
 void z80_reset(ushort entryAddr)
 {
-  //mem_init();
+  mem_init();
   memset(&z80ctx, 0, sizeof(Z80Context));
   Z80RESET(&z80ctx);
   z80ctx.PC = entryAddr;
@@ -200,15 +192,23 @@ void z80_reset(ushort entryAddr)
 
 void z80_reset()
 {
-  uint16_t entry_addr = mem_init();
-  z80_reset(entry_addr);
+  Z80RESET(&z80ctx);
+  mem_init();
   trs_screen.setMode(MODE_TEXT_64x16);
   trs_screen.setInverse(false);
   trs_screen.refresh();
+  z80ctx.memRead = z80_mem_read;
+  z80ctx.memWrite = z80_mem_write;
+  z80ctx.ioRead = z80_io_read;
+  z80ctx.ioWrite = z80_io_write;
 }
 
 void z80_run()
 {
+  if (z80_paused) {
+    vTaskDelay(pdMS_TO_TICKS(100));
+    return;
+  }
   unsigned last_tstate_count = z80ctx.tstates;
   Z80Execute(&z80ctx);
   total_tstate_count += z80ctx.tstates - last_tstate_count;
@@ -217,4 +217,16 @@ void z80_run()
     z80ctx.tstates -=  cycles_per_timer;
     z80ctx.int_req = 1;
   }
+}
+
+void z80_pause()
+{
+  z80_paused = true;
+  // Let the Z80 finish the current instruction
+  vTaskDelay(pdMS_TO_TICKS(50));
+}
+
+void z80_resume()
+{
+  z80_paused = false;
 }

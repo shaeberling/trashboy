@@ -3,7 +3,6 @@
 #define __TRS_H__
 
 #include <stdint.h>
-#include <freertos/semphr.h>
 
 typedef unsigned long long tstate_t;
 
@@ -21,5 +20,7 @@ uint8_t peek_mem(uint16_t address);
 void z80_reset(uint16_t entryAddr);
 void z80_reset();
 void z80_run();
+void z80_pause();
+void z80_resume();
 
 #endif

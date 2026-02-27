@@ -1,6 +1,7 @@
 
 
 #include "trs_screen.h"
+#include "settings.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +38,7 @@ ScreenBuffer::ScreenBuffer(uint8_t mode)
   this->canvas = nullptr;
   setMode(mode);
   clear();
+  printf("ScreenBuffer created with mode %d: width=%d, height=%d, char_width=%d, char_height=%d\n", mode, width, height, char_width, char_height);
 }
 
 ScreenBuffer::~ScreenBuffer()
@@ -153,8 +155,10 @@ ScreenBuffer* ScreenBuffer::getNext()
 
 void ScreenBuffer::copyBufferFrom(ScreenBuffer* buf)
 {
-  assert(buf != nullptr && width == buf->width && height == buf->height);
-  memcpy(screenBuffer, buf->screenBuffer, screen_chars);
+  if (buf != nullptr) {
+    assert(width == buf->width && height == buf->height);
+    memcpy(screenBuffer, buf->screenBuffer, screen_chars);
+  }
 }
 
 void ScreenBuffer::clear()
@@ -256,12 +260,15 @@ static const lv_color_t screen_lv_colors[] = {
 TRSScreen::TRSScreen()
 {
   top = nullptr;
+  trsCanvas = nullptr;
   prevScreenBuffer = (uint8_t*) malloc(MAX_TRS_SCREEN_WIDTH * MAX_TRS_SCREEN_HEIGHT);
   memset(prevScreenBuffer, 0xFF, MAX_TRS_SCREEN_WIDTH * MAX_TRS_SCREEN_HEIGHT);
+  mutex = xSemaphoreCreateRecursiveMutex();
 }
 
 void TRSScreen::init()
 {
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
   canvasWidth = lv_display_get_horizontal_resolution(lv_display_get_default());
   canvasHeight = lv_display_get_vertical_resolution(lv_display_get_default());
   printf("Display resolution: %ldx%ld\n", canvasWidth, canvasHeight);
@@ -276,46 +283,90 @@ void TRSScreen::init()
   lv_canvas_set_buffer(canvas, canvas_buf, canvasWidth, canvasHeight, LV_COLOR_FORMAT_RGB565);
   lv_canvas_fill_bg(canvas, lv_color_black(), LV_OPA_COVER);
   lv_obj_clear_flag(canvas, LV_OBJ_FLAG_SCROLLABLE);
-  trsCanvas = new TRSCanvas(canvas_buf, canvasWidth, canvasHeight, font_m3, TRS_M3_CHAR_WIDTH, TRS_M3_CHAR_HEIGHT, screen_lv_colors[1], lv_color_black());
+  createCanvas();
 #endif
+  xSemaphoreGiveRecursive(mutex);
+}
+
+void TRSScreen::createCanvas()
+{
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
+  if (trsCanvas != nullptr) {
+    delete trsCanvas;
+    trsCanvas = nullptr;
+  }
+  lv_color_t fg;
+  // Initialize TRSCanvas with the current font and colors
+  switch (settingsScreen.getScreenColor()) {
+    case SCREEN_COLOR_GREEN:
+      fg = screen_lv_colors[1];
+      break;
+    case SCREEN_COLOR_AMBER:
+      fg = screen_lv_colors[2];
+      break;
+    default:
+      fg = screen_lv_colors[0];
+      break;
+  }
+  lv_color_t bg = lv_color_black();
+  trsCanvas = new TRSCanvas(canvas_buf, canvasWidth, canvasHeight, font_m3, TRS_M3_CHAR_WIDTH, TRS_M3_CHAR_HEIGHT, fg, bg);
+  refresh();
+  xSemaphoreGiveRecursive(mutex);
 }
 
 void TRSScreen::push(ScreenBuffer* screenBuffer)
 {
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
   screenBuffer->setCanvas(canvas);
   screenBuffer->setNext(top);
+  screenBuffer->copyBufferFrom(top);
   top = screenBuffer;
+  xSemaphoreGiveRecursive(mutex);
 }
 
 void TRSScreen::pop()
 {
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
   ScreenBuffer* tmp = top;
   top = top->getNext();
   delete tmp;
+  xSemaphoreGiveRecursive(mutex);
 }
 
 void TRSScreen::setMode(uint8_t mode)
 {
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
   top->setMode(mode);
+  xSemaphoreGiveRecursive(mutex);
 }
 
 uint8_t TRSScreen::getMode()
 {
-  return top->getMode();
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
+  uint8_t mode = top->getMode();
+  xSemaphoreGiveRecursive(mutex);
+  return mode;
 }
 
 uint8_t TRSScreen::getWidth()
 {
-  return top->getWidth();
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
+  uint8_t width = top->getWidth();
+  xSemaphoreGiveRecursive(mutex);
+  return width;
 }
 
 uint8_t TRSScreen::getHeight()
 {
-  return top->getHeight();
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
+  uint8_t height = top->getHeight();
+  xSemaphoreGiveRecursive(mutex);
+  return height;
 }
 
 void TRSScreen::enableGrafyxMode(bool enable)
 {
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
   uint8_t mode = top->getMode();
   if (enable) {
     mode |= MODE_GRAFYX;
@@ -323,55 +374,73 @@ void TRSScreen::enableGrafyxMode(bool enable)
     mode &= ~MODE_GRAFYX;
   }
   top->setMode(mode);
+  xSemaphoreGiveRecursive(mutex);
 }
 
 void TRSScreen::setExpanded(int flag)
 {
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
   assert(top != nullptr);
   top->setExpanded(flag);
+  xSemaphoreGiveRecursive(mutex);
 }
 
 void TRSScreen::setInverse(int flag)
 {
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
   assert(top != nullptr);
   top->setInverse(flag);
+  xSemaphoreGiveRecursive(mutex);
 }
 
 bool TRSScreen::isTextMode()
 {
-  return (top->getMode() & MODE_GRAFYX) == 0;
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
+  bool isText = (top->getMode() & MODE_GRAFYX) == 0;
+  xSemaphoreGiveRecursive(mutex);
+  return isText;
 }
 
 void TRSScreen::drawChar(uint16_t pos, uint8_t character)
 {
+  //xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
   assert(top != nullptr);
   //if (isTextMode()) {
     top->drawChar(pos, character);
   //}
+  //xSemaphoreGiveRecursive(mutex);
 }
 
 bool TRSScreen::getChar(uint16_t pos, uint8_t& character)
 {
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
   assert(top != nullptr);
-  return top->getChar(pos, character);
+  bool result = top->getChar(pos, character);
+  xSemaphoreGiveRecursive(mutex);
+  return result;
 }
 
 void TRSScreen::clear()
 {
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
   assert(top != nullptr);
   top->clear();
+  xSemaphoreGiveRecursive(mutex);
 }
 
 void TRSScreen::refresh()
 {
-  assert(top != nullptr);
-  top->refresh();
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
+  memset(prevScreenBuffer, 0xFF, MAX_TRS_SCREEN_WIDTH * MAX_TRS_SCREEN_HEIGHT);
+  xSemaphoreGiveRecursive(mutex);
 }
 
 void TRSScreen::screenshot()
 {
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
 #if 0
   if (top == nullptr || !isTextMode() /* XXX || trs_printer_read() == 0xff*/) {
+    xSemaphoreGiveRecursive(mutex);
     return;
   }
   uint16_t pos = 0;
@@ -385,11 +454,14 @@ void TRSScreen::screenshot()
   }
   trs_printer_write('\r');
 #endif
+  xSemaphoreGiveRecursive(mutex);
 }
 
 void TRSScreen::render()
 {
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
   if (top == nullptr) {
+    xSemaphoreGiveRecursive(mutex);
     return;
   }
 
@@ -418,6 +490,16 @@ void TRSScreen::render()
   if (any_dirty) {
     lv_obj_invalidate(canvas);
   }
+  xSemaphoreGiveRecursive(mutex);
+}
+
+void TRSScreen::blit_glyph_to_canvas(uint8_t ch, int cell_x, int cell_y)
+{
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
+  if (trsCanvas != nullptr) {
+    trsCanvas->blit_glyph_to_canvas(ch, cell_x, cell_y);
+  }
+  xSemaphoreGiveRecursive(mutex);
 }
 
 TRSScreen trs_screen;
@@ -426,14 +508,8 @@ TRSScreen trs_screen;
 
 //----------------------------------------------------------------
 
-#if 0
 static const char* KEY_COLOR  = "color";
 
-
-static const uint8_t wiper_settings[][3] = {
-  {225, 225, 255},
-  {51, 255, 51},
-  {255, 177, 0}};
 
 void SettingsScreen::init() {
   setScreenColor(getScreenColor());
@@ -445,26 +521,8 @@ screen_color_t SettingsScreen::getScreenColor() {
 
 void SettingsScreen::setScreenColor(screen_color_t color) {
   nvs_set_u8(KEY_COLOR, color);
-
-#ifdef CONFIG_POCKET_TRS_TTGO_VGA32_SUPPORT
-  switch(color) {
-    case SCREEN_COLOR_WHITE:
-      DisplayController.setPaletteItem(1, RGB888(0xe0, 0xe0, 0xff));
-      break;
-    case SCREEN_COLOR_GREEN:
-      DisplayController.setPaletteItem(1, RGB888(0x33, 0xff, 0x33));
-      break;
-    case SCREEN_COLOR_AMBER:
-      DisplayController.setPaletteItem(1, RGB888( 0xff, 0xb0, 0x00));
-      break;
-  }
-#else
-  for (int i = 0; i < 3; i++) {
-    writeDigiPot(i, wiper_settings[color][i]);
-  }
-#endif
+  trs_screen.createCanvas();
 }
 
 SettingsScreen settingsScreen;
 
-#endif
