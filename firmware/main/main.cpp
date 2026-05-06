@@ -16,6 +16,7 @@ extern "C" {
 #include "ST7701S.h"
 #include "LVGL_Driver.h"
 #include "trs-lib.h"
+#include "splash.h"
 }
 #include "settings.h"
 #include "trs_memory.h"
@@ -78,6 +79,16 @@ void keyboard_connected_handler() {
 }
 
 static volatile bool do_z80_reset = false;
+static volatile bool splash_dismiss_requested = false;
+static volatile bool splash_dismissed = false;
+
+static bool key_report_contains(const BTKeyboard::KeyInfo &inf, uint8_t hid_code) {
+  // keys[0] is the modifier byte; keys[1..size-1] are pressed HID usage codes.
+  for (int i = 1; i < inf.size && i < BTKeyboard::MAX_KEY_DATA_SIZE; i++) {
+    if (inf.keys[i] == hid_code) return true;
+  }
+  return false;
+}
 
 void keyb_task(void* arg) {
   esp_err_t ret;
@@ -95,32 +106,50 @@ void keyb_task(void* arg) {
 
   if (bt_keyboard.setup(pairing_handler, keyboard_connected_handler,
                         keyboard_lost_connection_handler)) { // Must be called once
-    
+
     // Try to auto-connect to previously paired keyboard, retry continuously if paired but not connected
     while (!bt_keyboard.is_connected()) {
       bt_keyboard.auto_connect_bonded_device();
-      
+
       // Wait a bit to see if connection establishes
       vTaskDelay(pdMS_TO_TICKS(2000));
-      
+
       // If still not connected after auto-connect attempt
       if (!bt_keyboard.is_connected()) {
         // Check if we have bonded devices by attempting another auto-connect
         // (auto_connect_bonded_device returns early if no bonded devices exist)
         bt_keyboard.auto_connect_bonded_device();
         vTaskDelay(pdMS_TO_TICKS(1000));
-        
+
         // If still not connected, it means either no bonded device exists
         // or the bonded device is not available. Try scanning for new devices.
         if (!bt_keyboard.is_connected()) {
           ESP_LOGI(TAG, "Scanning for keyboards to pair...");
+          splash_set_status("Scanning for Bluetooth keyboard...");
           bt_keyboard.devices_scan(); // Required to discover new keyboards and for pairing
                                       // Default duration is 5 seconds
           vTaskDelay(pdMS_TO_TICKS(5000));
         }
       }
     }
-    
+
+    splash_set_paired();
+
+    // Wait for the user to press ENTER (HID 0x28) or keypad ENTER (0x58)
+    // to dismiss the splash and let the TRS-80 boot.
+    while (true) {
+      BTKeyboard::KeyInfo inf;
+      if (!bt_keyboard.wait_for_low_event(inf, pdMS_TO_TICKS(100))) continue;
+      if (key_report_contains(inf, 0x28) || key_report_contains(inf, 0x58)) break;
+    }
+
+    // Hand the LVGL teardown off to the pump task so it happens on the
+    // same core that drives lv_timer_handler.
+    splash_dismiss_requested = true;
+    while (!splash_dismissed) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
     while (true) {
       vTaskDelay(pdMS_TO_TICKS(5));
       BTKeyboard::KeyInfo inf;
@@ -159,6 +188,13 @@ void z80_task(void *arg)
   init_wifi();
   init_trs_lib();
 
+  // Wait for the splash screen to be dismissed (keyboard paired and ENTER pressed)
+  // before bringing up the TRS-80 screen, otherwise trs_screen.init() would create
+  // a full-screen canvas that hides the splash.
+  while (!splash_dismissed) {
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+
   trs_screen.init();
   trs_screen.push(new ScreenBuffer(MODE_TEXT_64x16));
   mem_init();
@@ -175,20 +211,38 @@ void z80_task(void *arg)
   }
 }
 
+void lvgl_pump_task(void *arg)
+{
+  // Drives LVGL while the splash is up, and tears it down on this same task
+  // so all LVGL calls stay on a single core. Exits once dismissed; ui_task
+  // takes over driving lv_timer_handler from then on.
+  while (!splash_dismiss_requested) {
+    splash_tick();
+    lv_timer_handler();
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+  splash_dismiss();
+  splash_dismissed = true;
+  vTaskDelete(NULL);
+}
+
 extern "C" void app_main(void)
 {
   // Initialize I2C (required by EXIO)
   I2C_Init();
-  
+
   // Initialize EXIO (required by LCD)
   EXIO_Init();
-  
+
   // Initialize LCD
   LCD_Init();
-  
+
   // Initialize LVGL
   LVGL_Init();
-    
+
+  splash_init();
+
+  xTaskCreatePinnedToCore(lvgl_pump_task, "lvgl_pump", 4096, NULL, 5, NULL, 1);
   xTaskCreatePinnedToCore(keyb_task, "keyb_task", 6000, NULL, 5, NULL, 0);
   z80_task(NULL);
 }
