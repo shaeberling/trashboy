@@ -5,6 +5,7 @@
 #include "trs.h"
 #include "io.h"
 #include <freertos/task.h>
+#include <esp_timer.h>
 #include <unistd.h>
 #include <time.h>
 #include <sys/time.h>
@@ -80,26 +81,39 @@ static int get_ticks()
                  (now.tv_usec - start_tv.tv_usec) / 1000;
 }
 
+static int64_t get_time_us()
+{
+  return esp_timer_get_time();
+}
+
 static void sync_time_with_host()
 {
-  unsigned int curtime;
-  unsigned int deltatime;
-  static unsigned int lasttime = 0;
+  int64_t curtime_us;
+  int64_t nexttime_us;
+  const int64_t deltatime_us = 1000000LL / (int64_t) timer_hz;
+  static int64_t lasttime_us = 0;
   static int count = 0;
 
-  deltatime = 1000 / timer_hz;
-
-  curtime = get_ticks();
-
-  if (lasttime + deltatime > curtime) {
-    vTaskDelay((lasttime + deltatime - curtime) / portTICK_PERIOD_MS);
-    //if ((count++ % 100) == 0) printf("DELAY: %d\n", (lasttime + deltatime - curtime) / portTICK_PERIOD_MS);
+  curtime_us = get_time_us();
+  if (lasttime_us == 0) {
+    lasttime_us = curtime_us;
   }
-  curtime = get_ticks();
 
-  lasttime += deltatime;
-  if ((lasttime + deltatime) < curtime) {
-    lasttime = curtime;
+  nexttime_us = lasttime_us + deltatime_us;
+  if (nexttime_us > curtime_us) {
+    int64_t wait_us = nexttime_us - curtime_us;
+    TickType_t wait_ticks = pdMS_TO_TICKS((wait_us + 999) / 1000);
+    if (wait_ticks > 0) {
+      vTaskDelay(wait_ticks);
+    }
+    //if ((count++ % 100) == 0) printf("DELAY us: %lld\n", (long long)wait_us);
+  }
+
+  curtime_us = get_time_us();
+
+  lasttime_us = nexttime_us;
+  if ((lasttime_us + deltatime_us) < curtime_us) {
+    lasttime_us = curtime_us;
   }
 }
 
@@ -192,7 +206,7 @@ void z80_run()
   unsigned last_tstate_count = z80ctx.tstates;
   Z80Execute(&z80ctx);
   total_tstate_count += z80ctx.tstates - last_tstate_count;
-  if (z80ctx.tstates >= cycles_per_timer) {
+  while (z80ctx.tstates >= cycles_per_timer) {
     sync_time_with_host();
     z80ctx.tstates -=  cycles_per_timer;
     z80ctx.int_req = 1;

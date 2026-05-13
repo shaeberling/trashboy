@@ -28,6 +28,7 @@ extern "C" {
 #include "trs-io.h"
 #include "trs-fs.h"
 #include "event.h"
+#include "sound.h"
 #include "retrostore.h"
 #include <vector>
 
@@ -642,6 +643,7 @@ void z80_task(void *arg)
   // stored. We drive the whole Wi-Fi lifecycle from the splash via
   // wifi_manager so the user can pick a network with the BT keyboard.
   init_trs_lib();
+  init_sound();
 
   // Wait for the splash screen to be dismissed (keyboard paired and ENTER pressed)
   // before bringing up the TRS-80 screen, otherwise trs_screen.init() would create

@@ -2,7 +2,7 @@
 
 #include "trs_screen.h"
 #include "trs_memory.h"
-//#include "cassette.h"
+#include "cassette.h"
 //#include "spi.h"
 //#include "i2s.h"
 #include "trs-io.h"
@@ -22,8 +22,8 @@ static int ctrlimage = 0;
 
 void z80_out(uint8_t address, uint8_t data, tstate_t z80_state_t_count)
 {
-#if 0
   switch(address) {
+#if 0
    case 0x80:
       grafyx_write_x(data);
       return;
@@ -82,11 +82,11 @@ void z80_out(uint8_t address, uint8_t data, tstate_t z80_state_t_count)
     case 0xFB:
       trs_printer_write(data);
       return;
+#endif
     case 0xff:
       trs_cassette_out(data & 3, z80_state_t_count);
       return;
   }
-#endif
 #if 0
   if ((address & 0xc0) == 0xc0) {
     printf("out(0x%02X, 0x%02X)\n", address, data);
