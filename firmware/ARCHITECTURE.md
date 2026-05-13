@@ -122,9 +122,24 @@ Implementation: `main/LVGL_Driver/LVGL_Driver.c:example_lvgl_flush_cb`. Constrai
 
 The TRS-80 emulator was built before the LVGL rotation work, and uses an older approach: `TRSCanvas` writes pixels **directly into an unrotated full-screen `lv_canvas` buffer**, doing the rotation by hand per glyph (`(sx, sy) → (sy, fw-1-sx)`). It does not use `lv_display_set_rotation`. This still works because LVGL just blits the canvas widget's buffer to the panel — but it means the emulator and the splash live in two different coordinate worlds.
 
-> ⚠️ **The TRS-80 path still assumes unrotated display.** `trs_screen.init()` calls `lv_display_get_horizontal_resolution()` which now returns the rotated value (640, not 480) thanks to the splash rotation. Before re-enabling the TRS-80 path post-splash, we'd need to either disable LVGL rotation before `trs_screen.init()` or convert TRSCanvas to use landscape coordinates directly. See `trs_screen.cpp:269` (`TRSScreen::init`).
+**Handoff back to ROTATION_0 before TRS-80 starts.** In `z80_task`, right before `trs_screen.init()`, we call:
+
+```c
+lv_display_set_rotation(lv_display_get_default(), LV_DISPLAY_ROTATION_0);
+```
+
+This way `trs_screen.init()` sees the native 480 / 640 resolution, allocates its canvas accordingly, and `TRSCanvas`'s manual rotation paints in the right place. The flush callback (see below) branches on `lv_display_get_rotation()` so this just works.
 
 Key file: `components/ptrs/trs_screen.h:119` (`blit_glyph_to_canvas`).
+
+### Adaptive flush callback
+
+`example_lvgl_flush_cb` checks `lv_display_get_rotation(disp)` on every flush and takes one of two paths:
+
+- **`ROTATION_0` (TRS-80 path)** — pass the LVGL buffer straight to `esp_lcd_panel_draw_bitmap` with no rotation, no copy. The emulator already rotated its content inside `lv_canvas`'s buffer.
+- **`ROTATION_270` (splash path)** — translate the area to panel-native, call `lv_draw_sw_rotate(px_map → rot_buf, …)`, then write `rot_buf` to the panel.
+
+**Big performance win for the TRS-80 path:** before we did this, the splash's rotation stayed on after dismissal, so every emulator frame went `buf1 → lv_draw_sw_rotate → rot_buf → panel`. With the adaptive flush, the emulator's hot path is `buf1 → panel`, eliminating one full PSRAM-to-PSRAM copy *and* the per-pixel rotation math each refresh. The emulator's per-glyph manual rotation is much cheaper than re-rotating the whole dirty area every frame.
 
 ### Strategies for rendering rotated UI
 
@@ -139,14 +154,52 @@ Key file: `components/ptrs/trs_screen.h:119` (`blit_glyph_to_canvas`).
 - **`lv_refr_now()` inside `splash_tick`.** Hangs the LVGL render task indefinitely when many transformed widgets are present. The async render driven by `lv_timer_handler` is fine.
 - **Fonts.** Only `lv_font_montserrat_14` is enabled by default. For crisper bigger text enable a specific size in `sdkconfig.defaults.esp32s3` (e.g. `CONFIG_LV_FONT_MONTSERRAT_28=y`) rather than scaling via transforms.
 
+## Memory placement — internal SRAM vs PSRAM
+
+The ESP32-S3 has 512 KB of internal SRAM and 8 MB of octal PSRAM. The build is configured (in `sdkconfig.defaults.esp32s3`) so most code and read-only data lives in PSRAM (`CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y`, `CONFIG_SPIRAM_RODATA=y`), leaving internal SRAM for things that have to be there: ISR-reachable IRAM, BT controller, Wi-Fi descriptors, task stacks, and the dynamic-allocation working set used by Wi-Fi/BT coexistence.
+
+**Lesson, learned the hard way:** **large static buffers in BSS go into internal SRAM by default** (DRAM, not PSRAM) and can starve Wi-Fi/BT coex of its working memory. Our first attempt at the RetroStore game launcher declared a 64 KB CMD-staging array as `static uint8_t storage[64*1024];` — and immediately Wi-Fi associations started failing during `auth → assoc` with `wifi:Coexist: Wi-Fi connect fail, apply reconnect coex policy` in the log. The 64 KB chunk had pushed the BT controller and Wi-Fi allocator into a tighter corner; the coex scheduler couldn't get the radio slot it needed.
+
+**Fix:** allocate large buffers from PSRAM, ideally lazily:
+
+```c
+static uint8_t *g_launch_cmd_storage = nullptr;
+static uint8_t *get_launch_cmd_storage() {
+    if (!g_launch_cmd_storage) {
+        g_launch_cmd_storage = (uint8_t *)
+            heap_caps_malloc(LAUNCH_CMD_MAX_BYTES, MALLOC_CAP_SPIRAM);
+    }
+    return g_launch_cmd_storage;
+}
+```
+
+Or for known-rarely-changing globals, use the `EXT_RAM_ATTR` (deprecated) / `EXT_RAM_BSS_ATTR` macros to place a BSS array directly in PSRAM. For runtime allocations, `heap_caps_malloc(size, MALLOC_CAP_SPIRAM)` is the clean way.
+
+**Diagnostic — heap watchdog.** A low-priority background task in `main.cpp` (`heap_diag_task`) logs every 2 s:
+
+```
+I (xxxx) heap: SRAM free=NN KB (largest MM KB)  PSRAM free=NN KB (largest MM KB)
+```
+
+Watch the *largest contiguous block* numbers, not just free totals. If SRAM's largest drops below ~25 KB you're about to break Wi-Fi/BT. Healthy steady-state on this firmware: ~65 KB SRAM free with ~28 KB largest block, ~3 MB PSRAM free with ~28 KB largest block. (PSRAM fragmentation is high because of how ESP-IDF maps code/rodata in chunks; that's fine, real allocations larger than a chunk get carved across.)
+
 ### Splash screen architecture (cross-reference)
 
-- LVGL is set up with `LV_DISPLAY_ROTATION_270` so widgets render in landscape (640 × 480). Pixel rotation happens in `example_lvgl_flush_cb` via `lv_draw_sw_rotate`.
-- `splash_root` is a full-screen 640 × 480 black `lv_obj`. The logo is `main/logo.c` (596 × 182 landscape) placed at `(22, 30)` in landscape coords for the BT-pairing screen, and scaled 50% to `(171, 5)` when we transition to the compact (Wi-Fi / RetroStore) layout. No widget transforms.
-- Status / list rows / subtext are plain `lv_label`s at `x=20`, `lv_obj_set_width(.., 600)` for wrapping.
+- LVGL is set up with `LV_DISPLAY_ROTATION_270` so widgets render in landscape (640 × 480). Pixel rotation happens in `example_lvgl_flush_cb` via `lv_draw_sw_rotate`. After the splash dismisses, `z80_task` sets rotation back to `ROTATION_0` for the TRS-80 emulator.
+- `splash_root` is a full-screen 640 × 480 black `lv_obj`. The logo is `main/logoc.c` (596 × 182 landscape, color, generated from `logo90c.c` by `scripts/rotate_logo.py`) placed at `(22, 30)` in landscape coords for the BT-pairing screen, and scaled 50% to `(171, 5)` for the compact (Wi-Fi / RetroStore) layout. No widget transforms.
+- Status (Montserrat 24), list rows / details (Montserrat 20), subtext (Montserrat 14) are plain `lv_label`s at `x=20`, `lv_obj_set_width(.., 600)` for wrapping. A second right-aligned label (`splash_subtext_right`) is used for two-hint bottoms (e.g. `ESC: back to list` left + `S: download & start` right on the RetroStore detail screen).
 - The splash is created in `app_main` before `z80_task`'s `trs_screen.init()`; an `lvgl_pump_task` drives `lv_timer_handler` while it's up, then exits when the user dismisses. After that, `ui_task` takes over and the TRS-80 owns the screen.
 
-Files: `main/splash.{c,h}`, `main/logo.c`, `main/LVGL_Driver/LVGL_Driver.c`, `main/main.cpp` (`app_main`, `lvgl_pump_task`).
+Files: `main/splash.{c,h}`, `main/logoc.c`, `main/LVGL_Driver/LVGL_Driver.c`, `main/main.cpp` (`app_main`, `lvgl_pump_task`).
+
+## Running RetroStore games
+
+The RetroStore browser in `main/main.cpp` (`run_retrostore_browse`, `show_app_details`) lets the user press **S** on the detail screen to download and start a game on the TRS-80 emulator. Pieces:
+
+- **Download**: `retrostore::RetroStore::FetchMediaImages(appId, {RsMediaType_COMMAND}, ...)` over Wi-Fi.
+- **CMD parser**: `components/ptrs/trs.cpp:trs_load_cmd(data, size)` parses the Disk-BASIC / LDOS CMD blocks (data blocks at 0x01, transfer entry at 0x02) and `poke_mem()`s the bytes into Z80 memory. Returns the entry address.
+- **Handoff to emulator**: `z80_task`, after `mem_init()` + `z80_reset()`, looks at the global `g_launch_cmd_data`. If non-null, calls `trs_load_cmd` + `z80_set_pc(entry)` to jump straight into the loaded program. Otherwise the system boots into ROM as normal.
+- **Buffer**: the downloaded CMD lives in a 64 KB PSRAM allocation (lazy, only made on the first launch). Z80 address space is 64 KB so anything bigger is bogus. **Don't put this buffer in BSS** — see the memory-placement section above.
 
 ## SDK config highlights — `sdkconfig`
 

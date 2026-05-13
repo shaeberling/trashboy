@@ -24,81 +24,6 @@ int trs_model = 3;
 static volatile bool z80_paused = false;
 static Z80Context z80ctx;
 
-#if 0
-static unsigned char* mem = NULL;
-
-extern const uint8_t cosmic_cmd_start[] asm("_binary_COSMIC_CMD_start");
-extern const uint8_t cosmic_cmd_end[] asm("_binary_COSMIC_CMD_end");
-
-uint16_t load_cmd(uint8_t* cmd)
-{
-  uint16_t offset = 0;
-  uint16_t load_addr = 0;
-  uint16_t entry_addr = 0;
-  uint16_t block_size = 0;
-
-  while (true) {
-    uint8_t block_type = cmd[offset++];
-    
-    if (block_type == 0x00) {
-      // End of file block
-      break;
-    } else if (block_type == 0x01) {
-      // Data block
-      block_size = cmd[offset++];
-      switch (block_size){
-        case 0:
-          block_size = 254;
-          break;
-        case 1:
-          block_size = 255;
-          break;
-        case 2:
-          block_size = 256;
-          break;
-        default:
-          block_size = block_size - 2;
-          break;
-      }
-      load_addr = (cmd[offset] | (cmd[offset + 1] << 8));
-      offset += 2;
-      
-      for (uint16_t i = 0; i < block_size; i++) {
-        mem[load_addr + i] = cmd[offset++];
-      }
-    } else if (block_type == 0x02) {
-      // Transfer address block (entry point)
-      offset += 1; // skip reserved bytes
-      entry_addr = (cmd[offset] | (cmd[offset + 1] << 8));
-      offset += 2;
-      break;
-    } else {
-      // Unknown block type, skip it
-      block_size = cmd[offset];
-      if (block_size == 0) {
-        block_size = 256;
-      }
-      offset += 1 + block_size; // skip block type, size, and data
-    }
-  }
-  
-  return entry_addr;
-}
-
-uint16_t mem_init()
-{
-  if (mem == NULL) {
-    mem = (unsigned char*) malloc(65536);
-    assert(mem != NULL);
-  }
-  memset(mem, 0, 65536);
-  uint16_t entry_addr = load_cmd((uint8_t*)cosmic_cmd_start);
-  printf("Loaded COSMIC CMD, entry point at 0x%04x\n", entry_addr);
-  //z80_reset(entry_addr);
-  return entry_addr;
-}
-#endif
-
 void trs_timer_speed(int fast)
 {
   if (trs_model == 3) fast = 0;
@@ -188,6 +113,61 @@ void z80_reset(ushort entryAddr)
   z80ctx.memWrite = z80_mem_write;
   z80ctx.ioRead = z80_io_read;
   z80ctx.ioWrite = z80_io_write;
+}
+
+// ------- TRS-80 CMD file loader --------------------------------------------
+//
+// Block layout (Disk BASIC / LDOS CMD format):
+//   0x01 <size> <addr_lo> <addr_hi> <bytes...>   data block (raw size
+//                                                 encoding: 0->254, 1->255,
+//                                                 2->256, else size-2)
+//   0x02 <unused> <entry_lo> <entry_hi>          transfer (entry) address
+//   0x00                                         optional EOF marker
+//
+// Other block types are skipped.
+uint16_t trs_load_cmd(const uint8_t *cmd, size_t size)
+{
+  size_t off = 0;
+  uint16_t entry = 0;
+  while (off < size) {
+    uint8_t type = cmd[off++];
+    if (type == 0x00) break;
+    if (off >= size) break;
+
+    if (type == 0x01) {
+      uint8_t raw = cmd[off++];
+      uint16_t block_size;
+      switch (raw) {
+        case 0: block_size = 254; break;
+        case 1: block_size = 255; break;
+        case 2: block_size = 256; break;
+        default: block_size = (uint16_t)(raw - 2); break;
+      }
+      if (off + 2 > size) break;
+      uint16_t load_addr = cmd[off] | ((uint16_t)cmd[off + 1] << 8);
+      off += 2;
+      for (uint16_t i = 0; i < block_size && off < size; i++) {
+        poke_mem((uint16_t)(load_addr + i), cmd[off++]);
+      }
+    } else if (type == 0x02) {
+      if (off + 3 > size) break;
+      off += 1; // size byte (typically 0x02, ignored)
+      entry = cmd[off] | ((uint16_t)cmd[off + 1] << 8);
+      off += 2;
+      break;
+    } else {
+      // Unknown block: skip its size+payload.
+      if (off >= size) break;
+      uint8_t skip = cmd[off++];
+      off += skip ? skip : 256;
+    }
+  }
+  return entry;
+}
+
+void z80_set_pc(uint16_t pc)
+{
+  z80ctx.PC = pc;
 }
 
 void z80_reset()

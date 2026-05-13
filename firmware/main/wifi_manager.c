@@ -24,6 +24,15 @@ static EventGroupHandle_t s_events = NULL;
 static bool s_initialized = false;
 static bool s_connect_in_progress = false;
 
+// BT/Wi-Fi coexistence on the ESP32-S3 frequently fails the FIRST few
+// association attempts when the BT keyboard is already paired (reason=4 /
+// WIFI_REASON_ASSOC_EXPIRE, "Coexist: Wi-Fi connect fail" in the log). The
+// stack settles after a couple of retries; we issue them transparently
+// from the disconnect handler instead of surfacing the failure on the
+// first attempt.
+#define WIFI_MGR_MAX_RETRIES 6
+static int s_retry_count = 0;
+
 static void event_handler(void *arg, esp_event_base_t base,
                           int32_t id, void *data)
 {
@@ -34,8 +43,22 @@ static void event_handler(void *arg, esp_event_base_t base,
             break;
         case WIFI_EVENT_STA_DISCONNECTED: {
             wifi_event_sta_disconnected_t *d = (wifi_event_sta_disconnected_t *) data;
-            ESP_LOGW(TAG, "STA disconnect, reason=%d", d ? d->reason : -1);
-            if (s_connect_in_progress) {
+            int reason = d ? d->reason : -1;
+            if (!s_connect_in_progress) {
+                ESP_LOGW(TAG, "STA disconnect, reason=%d (idle)", reason);
+                break;
+            }
+            if (s_retry_count < WIFI_MGR_MAX_RETRIES) {
+                s_retry_count++;
+                ESP_LOGW(TAG, "STA disconnect reason=%d, retry %d/%d",
+                         reason, s_retry_count, WIFI_MGR_MAX_RETRIES);
+                // esp_wifi_connect() will trigger another auth/assoc round
+                // on top of the existing wifi_config. The previous attempt's
+                // coex policy update gives subsequent tries a better shot.
+                esp_wifi_connect();
+            } else {
+                ESP_LOGE(TAG, "STA disconnect reason=%d, giving up after %d retries",
+                         reason, s_retry_count);
                 xEventGroupSetBits(s_events, WIFI_BIT_FAILED);
             }
             break;
@@ -45,7 +68,9 @@ static void event_handler(void *arg, esp_event_base_t base,
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = (ip_event_got_ip_t *) data;
-        ESP_LOGI(TAG, "got IP " IPSTR, IP2STR(&e->ip_info.ip));
+        ESP_LOGI(TAG, "got IP " IPSTR " after %d retr%s",
+                 IP2STR(&e->ip_info.ip), s_retry_count,
+                 s_retry_count == 1 ? "y" : "ies");
         xEventGroupSetBits(s_events, WIFI_BIT_CONNECTED);
     }
 }
@@ -144,7 +169,14 @@ bool wifi_mgr_connect(const char *ssid, const char *password, int timeout_ms)
     // that matches our credentials.
     cfg.sta.threshold.authmode = (password && password[0]) ? WIFI_AUTH_WEP : WIFI_AUTH_OPEN;
 
+    // Diagnostic: log credentials (the user asked for the password to be
+    // visible while we're debugging connection failures). This is a
+    // deliberate security trade-off — remove once Wi-Fi setup is stable.
+    ESP_LOGI(TAG, "wifi_mgr_connect: SSID='%s' PASSWORD='%s'",
+             ssid, (password && password[0]) ? password : "(empty)");
+
     xEventGroupClearBits(s_events, WIFI_BIT_CONNECTED | WIFI_BIT_FAILED);
+    s_retry_count = 0;
     s_connect_in_progress = true;
 
     if (esp_wifi_set_config(WIFI_IF_STA, &cfg) != ESP_OK) {
@@ -159,6 +191,9 @@ bool wifi_mgr_connect(const char *ssid, const char *password, int timeout_ms)
         return false;
     }
 
+    // Give the retry loop in event_handler time to land: each failed
+    // auth/assoc takes ~1-2 s on top of the caller's timeout budget.
+    if (timeout_ms < 25000) timeout_ms = 25000;
     EventBits_t bits = xEventGroupWaitBits(
         s_events, WIFI_BIT_CONNECTED | WIFI_BIT_FAILED,
         pdFALSE, pdFALSE, pdMS_TO_TICKS(timeout_ms));

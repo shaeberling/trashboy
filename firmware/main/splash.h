@@ -12,9 +12,14 @@ void splash_init(void);
 void splash_set_status(const char *text);
 void splash_set_paired(void);
 
-// Optional second line shown just below the status (used for the password
-// entry value). Pass NULL or "" to hide. Lifetime same as splash_set_status.
+// Optional bottom-left hint (used for the password entry value or the
+// "ESC: back" hint). Pass NULL or "" to hide. Lifetime same as
+// splash_set_status.
 void splash_set_subtext(const char *text);
+
+// Optional bottom-RIGHT hint, displayed at the same y as the left subtext
+// but right-aligned. Pass NULL or "" to hide.
+void splash_set_subtext_right(const char *text);
 
 // Apply any pending status updates. Call from the LVGL-driving task.
 void splash_tick(void);

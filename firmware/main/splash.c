@@ -45,13 +45,15 @@ static int g_status_user_top  = 0;
 static int g_list_user_top    = 0;
 static int g_subtext_user_top = 0;
 
-static lv_obj_t *splash_root    = NULL;
-static lv_obj_t *splash_logo    = NULL;
-static lv_obj_t *splash_status  = NULL;
-static lv_obj_t *splash_subtext = NULL;
+static lv_obj_t *splash_root         = NULL;
+static lv_obj_t *splash_logo         = NULL;
+static lv_obj_t *splash_status       = NULL;
+static lv_obj_t *splash_subtext      = NULL;
+static lv_obj_t *splash_subtext_right = NULL;
 
-static const char * volatile pending_status   = NULL;
-static const char * volatile pending_subtext  = NULL;
+static const char * volatile pending_status        = NULL;
+static const char * volatile pending_subtext       = NULL;
+static const char * volatile pending_subtext_right = NULL;
 static volatile bool pending_compact = false;
 
 typedef enum { LIST_OP_NONE, LIST_OP_SHOW, LIST_OP_SEL, LIST_OP_HIDE } list_op_t;
@@ -90,6 +92,9 @@ static void apply_layout(bool compact)
     }
     if (splash_subtext) {
         lv_obj_set_pos(splash_subtext, TEXT_USER_LEFT, g_subtext_user_top);
+    }
+    if (splash_subtext_right) {
+        lv_obj_set_pos(splash_subtext_right, TEXT_USER_LEFT, g_subtext_user_top);
     }
     for (int i = 0; i < list_count; i++) {
         if (!list_labels[i]) continue;
@@ -155,6 +160,11 @@ void splash_set_compact(void)
 void splash_set_subtext(const char *text)
 {
     pending_subtext = text ? text : "";
+}
+
+void splash_set_subtext_right(const char *text)
+{
+    pending_subtext_right = text ? text : "";
 }
 
 void splash_show_list(const char * const *items, int count, int selected)
@@ -241,9 +251,32 @@ static void apply_subtext(const char *t)
         lv_obj_set_style_bg_opa(splash_subtext, LV_OPA_TRANSP, 0);
         lv_obj_set_width(splash_subtext, TEXT_WIDTH);
         lv_label_set_long_mode(splash_subtext, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_align(splash_subtext, LV_TEXT_ALIGN_LEFT, 0);
     }
     lv_label_set_text(splash_subtext, t);
     lv_obj_set_pos(splash_subtext, TEXT_USER_LEFT, g_subtext_user_top);
+}
+
+static void apply_subtext_right(const char *t)
+{
+    if (t[0] == '\0') {
+        if (splash_subtext_right) {
+            lv_obj_del(splash_subtext_right);
+            splash_subtext_right = NULL;
+        }
+        return;
+    }
+    if (!splash_subtext_right) {
+        splash_subtext_right = lv_label_create(splash_root);
+        lv_obj_set_style_text_color(splash_subtext_right, lv_color_white(), 0);
+        lv_obj_set_style_text_font(splash_subtext_right, SUBTEXT_FONT, 0);
+        lv_obj_set_style_bg_opa(splash_subtext_right, LV_OPA_TRANSP, 0);
+        lv_obj_set_width(splash_subtext_right, TEXT_WIDTH);
+        lv_label_set_long_mode(splash_subtext_right, LV_LABEL_LONG_CLIP);
+        lv_obj_set_style_text_align(splash_subtext_right, LV_TEXT_ALIGN_RIGHT, 0);
+    }
+    lv_label_set_text(splash_subtext_right, t);
+    lv_obj_set_pos(splash_subtext_right, TEXT_USER_LEFT, g_subtext_user_top);
 }
 
 void splash_tick(void)
@@ -268,6 +301,12 @@ void splash_tick(void)
         apply_subtext(st);
     }
 
+    const char *str = pending_subtext_right;
+    if (str != NULL) {
+        pending_subtext_right = NULL;
+        apply_subtext_right(str);
+    }
+
     list_op_t op = pending_list_op;
     if (op != LIST_OP_NONE) {
         pending_list_op = LIST_OP_NONE;
@@ -284,6 +323,10 @@ void splash_dismiss(void)
 {
     apply_list_hide();
     if (splash_subtext) { lv_obj_del(splash_subtext); splash_subtext = NULL; }
+    if (splash_subtext_right) {
+        lv_obj_del(splash_subtext_right);
+        splash_subtext_right = NULL;
+    }
     if (splash_root != NULL) {
         lv_obj_del(splash_root);
         splash_root = NULL;

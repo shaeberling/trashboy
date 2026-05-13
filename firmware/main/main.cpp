@@ -85,6 +85,13 @@ static volatile bool do_z80_reset = false;
 static volatile bool splash_dismiss_requested = false;
 static volatile bool splash_dismissed = false;
 
+// If non-null when z80_task starts the emulator, it loads this CMD blob
+// over the freshly-reset Z80 memory and jumps to the parsed entry point.
+// Owned by main; lives in PSRAM via std::vector backing in main flow.
+static const uint8_t *volatile g_launch_cmd_data = nullptr;
+static volatile size_t          g_launch_cmd_size = 0;
+static volatile uint16_t        g_launch_entry    = 0;
+
 static bool key_report_contains(const BTKeyboard::KeyInfo &inf, uint8_t hid_code) {
   // keys[0] is the modifier byte; keys[1..size-1] are pressed HID usage codes.
   for (int i = 1; i < inf.size && i < BTKeyboard::MAX_KEY_DATA_SIZE; i++) {
@@ -96,6 +103,7 @@ static bool key_report_contains(const BTKeyboard::KeyInfo &inf, uint8_t hid_code
 // HID usage codes we recognise directly from raw reports.
 static constexpr uint8_t HID_ENTER = 0x28;
 static constexpr uint8_t HID_ESC   = 0x29;
+static constexpr uint8_t HID_S     = 0x16;   // letter 'S' / 's'
 
 // Block until a HID report contains the given usage-code as a press.
 static void wait_for_hid_press(uint8_t hid_code) {
@@ -104,17 +112,25 @@ static void wait_for_hid_press(uint8_t hid_code) {
   BTKeyboard::KeyInfo inf;
   while (true) {
     if (!bt_keyboard.wait_for_low_event(inf, pdMS_TO_TICKS(2000))) {
-      ESP_LOGI(TAG, "  ...still waiting for 0x%02x, connected=%d",
-               hid_code, bt_keyboard.is_connected());
       continue;
     }
-    ESP_LOGI(TAG, "  HID: size=%d keys=[%02x %02x %02x %02x %02x %02x] mod=0x%02x",
-             inf.size, inf.keys[0], inf.keys[1], inf.keys[2],
-             inf.keys[3], inf.keys[4], inf.keys[5], (int)inf.modifier);
     for (int i = 1; i < inf.size && i < BTKeyboard::MAX_KEY_DATA_SIZE; i++) {
-      if (inf.keys[i] == hid_code) {
-        ESP_LOGI(TAG, "  -> matched 0x%02x at keys[%d], returning", hid_code, i);
-        return;
+      if (inf.keys[i] == hid_code) return;
+    }
+  }
+}
+
+// Block until a HID report contains ANY of the given usage codes pressed.
+// Returns the matched code (one of `codes`). 0 if a 0-length list was passed.
+static uint8_t wait_for_any_hid_press(const uint8_t *codes, int n) {
+  BTKeyboard::KeyInfo inf;
+  while (true) {
+    if (!bt_keyboard.wait_for_low_event(inf, pdMS_TO_TICKS(2000))) continue;
+    for (int i = 1; i < inf.size && i < BTKeyboard::MAX_KEY_DATA_SIZE; i++) {
+      uint8_t k = inf.keys[i];
+      if (k == 0) continue;
+      for (int j = 0; j < n; j++) {
+        if (k == codes[j]) return k;
       }
     }
   }
@@ -307,8 +323,84 @@ static int append_wrapped(int line, const std::string &text) {
   return line;
 }
 
-// Show details for the given app and block until the user presses a key.
-static void show_app_details(retrostore::RetroStore &rs, const std::string &app_id) {
+// Storage for the downloaded CMD bytes — allocated *lazily* in PSRAM the
+// first time the user starts a game. Originally this was a 64 KB static
+// array in BSS (internal SRAM), but that displaced Wi-Fi/BT coex working
+// memory and caused association timeouts. Z80 address space is 64 KB so
+// no real-world program exceeds that.
+#define LAUNCH_CMD_MAX_BYTES (64 * 1024)
+static uint8_t *g_launch_cmd_storage = nullptr;
+
+static uint8_t *get_launch_cmd_storage() {
+  if (!g_launch_cmd_storage) {
+    g_launch_cmd_storage = (uint8_t *)
+        heap_caps_malloc(LAUNCH_CMD_MAX_BYTES, MALLOC_CAP_SPIRAM);
+    if (!g_launch_cmd_storage) {
+      ESP_LOGE(TAG, "Failed to allocate %d bytes for launch CMD in PSRAM",
+               LAUNCH_CMD_MAX_BYTES);
+    }
+  }
+  return g_launch_cmd_storage;
+}
+
+// Fetch the COMMAND-type media image for `app_id`, copy into
+// g_launch_cmd_storage, parse the CMD entry address, and set the
+// g_launch_cmd_data / g_launch_cmd_size / g_launch_entry handoff state.
+// Returns true if the program is ready to be started by z80_task.
+static bool download_and_prepare_launch(retrostore::RetroStore &rs,
+                                        const std::string &app_id,
+                                        const std::string &app_name) {
+  splash_set_status("Downloading game...");
+  splash_hide_list();
+  splash_set_subtext("");
+  splash_set_subtext_right("");
+
+  std::vector<retrostore::RsMediaImage> images;
+  std::vector<retrostore::RsMediaType> types = { retrostore::RsMediaType_COMMAND };
+  if (!rs.FetchMediaImages(app_id, types, &images) || images.empty()) {
+    ESP_LOGE(TAG, "No COMMAND image for app %s", app_id.c_str());
+    splash_set_status("No .cmd image available for this game");
+    vTaskDelay(pdMS_TO_TICKS(2500));
+    return false;
+  }
+
+  const auto &img = images[0];
+  if (img.data_size <= 0 || (size_t)img.data_size > LAUNCH_CMD_MAX_BYTES) {
+    ESP_LOGE(TAG, "CMD size %d out of bounds (max %d)",
+             img.data_size, LAUNCH_CMD_MAX_BYTES);
+    splash_set_status("Game image too large");
+    vTaskDelay(pdMS_TO_TICKS(2500));
+    return false;
+  }
+  uint8_t *buf = get_launch_cmd_storage();
+  if (!buf) {
+    splash_set_status("Out of memory for game image");
+    vTaskDelay(pdMS_TO_TICKS(2500));
+    return false;
+  }
+  memcpy(buf, img.data.get(), img.data_size);
+  g_launch_cmd_data = buf;
+  g_launch_cmd_size = (size_t) img.data_size;
+  ESP_LOGI(TAG, "Loaded %d-byte CMD '%s' for %s",
+           img.data_size, img.filename.c_str(), app_name.c_str());
+
+  char msg[80];
+  snprintf(msg, sizeof(msg), "Starting %s...", app_name.c_str());
+  splash_set_status(msg);
+  vTaskDelay(pdMS_TO_TICKS(600));
+  return true;
+}
+
+// Result from show_app_details so the caller knows whether to resume the
+// picker or hand off to the emulator.
+enum show_app_result_t {
+  SHOW_APP_BACK,   // user pressed ESC; resume picker
+  SHOW_APP_LAUNCH  // user pressed S; g_launch_cmd_* are now armed
+};
+
+// Show details for the given app and block until ESC (back) or S (start).
+static show_app_result_t show_app_details(retrostore::RetroStore &rs,
+                                          const std::string &app_id) {
   splash_set_status("Loading details...");
   splash_hide_list();
   splash_set_subtext("");
@@ -318,7 +410,7 @@ static void show_app_details(retrostore::RetroStore &rs, const std::string &app_
     ESP_LOGE(TAG, "RetroStore::FetchApp(%s) failed", app_id.c_str());
     splash_set_status("Failed to load details");
     vTaskDelay(pdMS_TO_TICKS(2000));
-    return;
+    return SHOW_APP_BACK;
   }
 
   ESP_LOGI(TAG, "App detail: %s -- %s (%d) model=%d v%s  desc_len=%u",
@@ -360,14 +452,23 @@ static void show_app_details(retrostore::RetroStore &rs, const std::string &app_
 
   splash_set_status(app.name.c_str());
   splash_show_list(lines, line, -1);  // -1 = no highlight
-  splash_set_subtext("Press ESC to return");
+  splash_set_subtext("ESC: back to list");
+  splash_set_subtext_right("S: download & start");
 
-  // Wait specifically for ESC. Using a generic "any key" exit causes the
-  // picker we return to to immediately re-select the same game on the
-  // next ENTER press, which feels like being stuck.
-  wait_for_hid_press(HID_ESC);
+  // Wait for ESC (back) or S (download + start).
+  const uint8_t keys[] = { HID_ESC, HID_S };
+  uint8_t pressed = wait_for_any_hid_press(keys, 2);
 
   splash_set_subtext("");
+  splash_set_subtext_right("");
+
+  if (pressed == HID_S) {
+    if (download_and_prepare_launch(rs, app_id, app.name)) {
+      return SHOW_APP_LAUNCH;
+    }
+    // Fetch failed; fall through to "back" so user can pick something else.
+  }
+  return SHOW_APP_BACK;
 }
 
 static void run_retrostore_browse() {
@@ -412,7 +513,12 @@ static void run_retrostore_browse() {
     } else if (ch == K_UP) {
       if (sel > 0)     { sel--; splash_set_list_selection(sel); }
     } else if (ch == K_ENTER) {
-      show_app_details(rs, apps[sel].id);
+      show_app_result_t r = show_app_details(rs, apps[sel].id);
+      if (r == SHOW_APP_LAUNCH) {
+        // Game image is staged in g_launch_cmd_*; let the caller dismiss
+        // the splash and hand off to z80_task.
+        return;
+      }
       // Drain any stale key events (e.g. the release of the ESC the user
       // hit to leave the details screen) before resuming the picker.
       drain_bt_events();
@@ -543,10 +649,35 @@ void z80_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(20));
   }
 
+  // Hand the display back to the TRS-80 emulator's coordinate system:
+  // TRSCanvas does its own manual rotation of pixels into an unrotated
+  // 480x640 native canvas, so LVGL must be at ROTATION_0 here (otherwise
+  // trs_screen.init() reads the wrong horizontal/vertical resolution and
+  // we get a double-rotated picture). The flush callback adapts based on
+  // the current rotation and just blits straight through when it's 0.
+  lv_display_set_rotation(lv_display_get_default(), LV_DISPLAY_ROTATION_0);
+
   trs_screen.init();
   trs_screen.push(new ScreenBuffer(MODE_TEXT_64x16));
   mem_init();
   z80_reset();
+
+  // If the splash flow downloaded a CMD via the RetroStore browser, load
+  // it over the freshly-reset Z80 memory and jump straight into it.
+  if (g_launch_cmd_data != nullptr && g_launch_cmd_size > 0) {
+    ESP_LOGI(TAG, "Loading launched CMD (%u bytes) into Z80 memory",
+             (unsigned) g_launch_cmd_size);
+    uint16_t entry = trs_load_cmd(g_launch_cmd_data, g_launch_cmd_size);
+    if (entry != 0) {
+      ESP_LOGI(TAG, "Launched CMD entry = 0x%04x", entry);
+      z80_set_pc(entry);
+    } else {
+      ESP_LOGW(TAG, "Launched CMD has no transfer (entry) block; "
+                    "falling back to ROM boot");
+    }
+    g_launch_cmd_data = nullptr;
+    g_launch_cmd_size = 0;
+  }
 
   xTaskCreatePinnedToCore(ui_task, "ui_task", 6000, NULL, 5, NULL, 1);
 
@@ -600,6 +731,25 @@ void lvgl_pump_task(void *arg)
   vTaskDelete(NULL);
 }
 
+// Periodically log free heap in internal SRAM and PSRAM, plus the largest
+// contiguous block in each. Helps diagnose memory pressure that affects
+// Wi-Fi/BT coex.
+static void heap_diag_task(void *arg) {
+  while (true) {
+    size_t free_sram      = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t free_psram     = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    size_t largest_sram   = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    size_t largest_psram  = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    ESP_LOGI("heap",
+             "SRAM free=%u KB (largest %u KB)  PSRAM free=%u KB (largest %u KB)",
+             (unsigned)(free_sram     / 1024),
+             (unsigned)(largest_sram  / 1024),
+             (unsigned)(free_psram    / 1024),
+             (unsigned)(largest_psram / 1024));
+    vTaskDelay(pdMS_TO_TICKS(2000));
+  }
+}
+
 extern "C" void app_main(void)
 {
   // Initialize I2C (required by EXIO)
@@ -621,5 +771,6 @@ extern "C" void app_main(void)
   // many transformed labels are present, which silently wedges the task.
   xTaskCreatePinnedToCore(lvgl_pump_task, "lvgl_pump", 8192, NULL, 5, NULL, 1);
   xTaskCreatePinnedToCore(keyb_task, "keyb_task", 6000, NULL, 5, NULL, 0);
+  xTaskCreatePinnedToCore(heap_diag_task, "heap_diag", 3072, NULL, 1, NULL, 0);
   z80_task(NULL);
 }

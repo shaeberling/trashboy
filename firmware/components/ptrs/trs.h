@@ -3,6 +3,7 @@
 #define __TRS_H__
 
 #include <stdint.h>
+#include <stddef.h>
 
 typedef unsigned long long tstate_t;
 
@@ -22,5 +23,14 @@ void z80_reset();
 void z80_run();
 void z80_pause();
 void z80_resume();
+
+// Parse a TRS-80 CMD file and write its data blocks into Z80 memory via
+// poke_mem(). Returns the entry address declared in the file's transfer
+// block, or 0 if none was found. Safe to call after z80_reset() — overlay
+// the loaded program on top of the freshly-reset memory.
+uint16_t trs_load_cmd(const uint8_t *data, size_t size);
+
+// Set the Z80 PC. Used after trs_load_cmd() to jump into the loaded program.
+void z80_set_pc(uint16_t pc);
 
 #endif

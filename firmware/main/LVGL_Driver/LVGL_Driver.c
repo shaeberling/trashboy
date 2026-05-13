@@ -31,26 +31,43 @@ static void *rot_buf = NULL;
 void example_lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
     esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) lv_display_get_user_data(disp);
-    lv_color_format_t cf = lv_display_get_color_format(disp);
+    const lv_display_rotation_t rotation = lv_display_get_rotation(disp);
 
+    if (rotation == LV_DISPLAY_ROTATION_0) {
+        // No rotation: pass the buffer straight through to the panel.
+        // (Used by the TRS-80 emulator path, which does its own pixel
+        // rotation inside TRSCanvas while LVGL renders natively.)
+#if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
+        xSemaphoreGive(sem_gui_ready);
+        xSemaphoreTake(sem_vsync_end, portMAX_DELAY);
+#endif
+        esp_lcd_panel_draw_bitmap(panel_handle,
+                                  area->x1, area->y1,
+                                  area->x2 + 1, area->y2 + 1,
+                                  px_map);
+        lv_display_flush_ready(disp);
+        return;
+    }
+
+    // Software rotation path (used by the splash UI). LVGL has already
+    // rendered into px_map in the rotated landscape coordinate space; we
+    // translate the area back to panel-native and rotate the pixels.
+    lv_color_format_t cf = lv_display_get_color_format(disp);
     const int32_t src_w = lv_area_get_width(area);
     const int32_t src_h = lv_area_get_height(area);
 
-    // Translate the user-view (landscape) area into panel-native coords.
-    // Width and height swap because of the 90° rotation.
     lv_area_t rot_area;
     rot_area.x1 = area->y1;
     rot_area.y1 = (EXAMPLE_LCD_V_RES - 1) - area->x2;
     rot_area.x2 = area->y2;
     rot_area.y2 = (EXAMPLE_LCD_V_RES - 1) - area->x1;
 
-    // Rotate pixels from user-view into rot_buf in panel orientation.
     const uint32_t src_stride  = lv_draw_buf_width_to_stride((uint32_t) src_w, cf);
     const uint32_t dest_stride = lv_draw_buf_width_to_stride((uint32_t) src_h, cf);
     lv_draw_sw_rotate(px_map, rot_buf,
                       src_w, src_h,
                       (int32_t) src_stride, (int32_t) dest_stride,
-                      LV_DISPLAY_ROTATION_270, cf);
+                      rotation, cf);
 
 #if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
     xSemaphoreGive(sem_gui_ready);
