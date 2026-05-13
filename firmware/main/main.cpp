@@ -606,11 +606,12 @@ void keyb_task(void* arg) {
       BTKeyboard::KeyInfo inf;
 
       bt_keyboard.wait_for_low_event(inf);
-      if (inf.size == 4 && inf.keys[2] == 2 /* F5 */) {
+      if ((inf.size == 4 && inf.keys[2] == 2    /* F5 */) ||
+          (inf.size == 8 && inf.keys[2] == 0x3e /* F5 on Rii */)) {
         z80_pause();
         configure_pocket_trs();
         z80_resume();
-      } else if (inf.size > 4 && inf.keys[0] == 5 && inf.keys[1] == 0x4c /* Ctrl+Alt+Del */) {
+      } else if (inf.size > 4 && inf.keys[0] == 5 && (inf.keys[1] == 0x4c || inf.keys[2] == 0x4c) /* Ctrl+Alt+Del */) {
         do_z80_reset = true;
       } else {
         process_key(inf);

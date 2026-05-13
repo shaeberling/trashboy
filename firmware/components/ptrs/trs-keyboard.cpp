@@ -516,7 +516,7 @@ void process_key(BTKeyboard::KeyInfo& inf)
   // Current modifier byte
   uint8_t currentModifier = inf.keys[0];
 
-  printf("Modifier: 0x%02x\n", currentModifier);
+  //printf("Modifier: 0x%02x\n", currentModifier);
   
   // Process modifier key changes (Shift and Ctrl only, as mapped in VK)
   const uint8_t modifierBits[] = {0x01, 0x02, 0x10, 0x20}; // Left Ctrl, Left Shift, Right Ctrl, Right Shift
