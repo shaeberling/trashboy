@@ -104,51 +104,49 @@ user_y = native_x
 
 This mapping is the one TRSCanvas uses (see `components/ptrs/trs_screen.h`, `blit_glyph_to_canvas`).
 
+### How the splash UI rotates (LVGL display rotation + sw_rotate)
+
+The splash UI uses LVGL's display rotation feature with software pixel rotation in the flush callback. The combination is exactly what Espressif's `esp_lvgl_port` does when its `.sw_rotate = true` flag is set, and is the pattern documented in [LVGL v9's rotation chapter](https://docs.lvgl.io/9.4/details/main-modules/display/rotation.html).
+
+**Two pieces are required together — neither alone works:**
+
+1. **`lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_270)`** — this only swaps the reported width/height so widgets get laid out in landscape (640 × 480) coordinates. It does **not** rotate pixels by itself; if you do this without the second piece you get noise on the panel because LVGL hands the framebuffer pixels in the wrong orientation.
+2. **Pixel rotation in the flush callback** — for every dirty rectangle LVGL flushes, we:
+    1. translate `area` from user-view (landscape) coords to panel-native (portrait) coords using the user↔native mapping above;
+    2. call `lv_draw_sw_rotate(px_map, rot_buf, …, LV_DISPLAY_ROTATION_270, cf)` to rotate the pixel buffer into a pre-allocated rotation-destination buffer (`rot_buf`, full-screen size in PSRAM);
+    3. write the rotated buffer to the panel at the translated coords.
+
+Implementation: `main/LVGL_Driver/LVGL_Driver.c:example_lvgl_flush_cb`. Constraints documented in the search results: `sw_rotate` is **incompatible with `LV_DISPLAY_RENDER_MODE_DIRECT` or `FULL`** — must be `PARTIAL`, which is what we use.
+
 ### How the TRS-80 emulator rotates
 
-`TRSCanvas` writes pixels **directly into the LVGL canvas buffer** with the rotation done by hand: for each glyph, source `(sx, sy)` is written to canvas `(sy, fw-1-sx)` style transforms. There is **no LVGL display rotation** involved. The `lv_canvas` widget is a plain unrotated full-screen buffer; the rotation is baked into the pixel writes.
+The TRS-80 emulator was built before the LVGL rotation work, and uses an older approach: `TRSCanvas` writes pixels **directly into an unrotated full-screen `lv_canvas` buffer**, doing the rotation by hand per glyph (`(sx, sy) → (sy, fw-1-sx)`). It does not use `lv_display_set_rotation`. This still works because LVGL just blits the canvas widget's buffer to the panel — but it means the emulator and the splash live in two different coordinate worlds.
+
+> ⚠️ **The TRS-80 path still assumes unrotated display.** `trs_screen.init()` calls `lv_display_get_horizontal_resolution()` which now returns the rotated value (640, not 480) thanks to the splash rotation. Before re-enabling the TRS-80 path post-splash, we'd need to either disable LVGL rotation before `trs_screen.init()` or convert TRSCanvas to use landscape coordinates directly. See `trs_screen.cpp:269` (`TRSScreen::init`).
 
 Key file: `components/ptrs/trs_screen.h:119` (`blit_glyph_to_canvas`).
 
-### Why we don't use `lv_display_set_rotation`
-
-We tried `lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_90)` and `_270` for the splash screen and it had **no visible effect** — both rotation values produced output identical to `_0`. The rotation is silently dropped somewhere in the path between LVGL's flush and the RGB panel's framebuffer. Likely culprits: the partial-mode buffer setup in `LVGL_Driver.c`, esp_lcd's RGB panel writing through a hardware framebuffer, or LVGL v9 partial-mode rotation not playing well with this driver chain.
-
-**Don't rely on `lv_display_set_rotation` here.** Use one of the strategies below.
-
 ### Strategies for rendering rotated UI
 
-1. **Pre-rotated raster assets.** When you have a static image, rotate it offline (90° CCW) and store the rotated bytes. Then place the `lv_image` widget at native coordinates that map to the desired user-view position. The logo is shipped this way: `main/logo90c.c` is the original 596 × 182 logo stored as **182 × 596 in native** (rotated). It just gets a normal `lv_image_create` + `lv_obj_set_pos` — no LVGL transform needed.
+1. **The splash approach (`lv_display_set_rotation` + sw_rotate flush).** Best default for new LVGL UI. Widgets use plain landscape coords, no transforms.
+2. **Pre-rotated raster assets** — if you have a static image, rotate offline and store the rotated bytes; place at native coords. `main/logo90c.c` is the original 596 × 182 logo stored as 182 × 596 native, and was used by an earlier splash iteration. Currently unused; `main/logo.c` (the original landscape orientation) is what the splash uses now since LVGL rotation handles the rest.
+3. **Manual pixel blit into a canvas (the TRS-80 approach).** Reliable but verbose. Use when you need to share a buffer between subsystems or want to do the rotation yourself.
 
-2. **LVGL widget transforms (for text and small dynamic content).** `lv_obj_set_style_transform_rotation` *does* work — it is applied at draw-time and is independent of `lv_display_set_rotation`. The recipe used by the splash status label:
+### What we tried and discarded
 
-   ```c
-   lv_obj_set_style_transform_rotation(label, 2700, 0); // 90° CCW; LVGL is CW-positive in 0.1° units
-   lv_obj_set_style_transform_pivot_x(label, 0, 0);
-   lv_obj_set_style_transform_pivot_y(label, 0, 0);
-   // Optional 2x scale (256 = 1x):
-   lv_obj_set_style_transform_scale(label, 512, 0);
-   ```
-
-   With pivot at the widget's top-left and a CCW rotation, the widget's `set_pos` becomes the **left edge of the rotated text in the user's landscape view**, and the text extends to the right (= up in native) and downward (= right in native).
-
-3. **Manual pixel blit into a canvas** (the TRS-80 approach). For complex composites or when widget transforms aren't enough, allocate an `lv_canvas` and write rotated pixels into its buffer directly — same as `TRSCanvas`.
-
-### Widget transform gotchas (learned the hard way)
-
-- **`LV_OBJ_FLAG_OVERFLOW_VISIBLE` on `lv_scr_act()` breaks rendering.** Setting it on the *screen object* causes the entire splash to render as black (logo and label both vanish). Setting it on a regular `lv_obj` child (e.g., `splash_root`) is fine. Stick to children.
-- **Rotated content can be clipped to the unrotated bounding box.** A label of size W × H rotated 90° CCW around (0,0) draws into widget-local `(0, -W)…(H, 0)` — i.e., outside the unrotated bbox. LVGL's `ext_draw_size` usually expands automatically when a transform is set, but if rendering looks clipped, set `LV_OBJ_FLAG_OVERFLOW_VISIBLE` on the **parent** container (not the screen) to disable clipping.
-- **Auto-sized labels: query width *after* layout.** To center a rotated label, do `lv_obj_update_layout(label); int w = lv_obj_get_width(label);` and recompute the widget position. Account for any `transform_scale` (`rendered = w * scale / 256`). The splash recomputes this whenever the status text changes, see `main/splash.c:center_status_horizontally`.
-- **Fonts.** Only `lv_font_montserrat_14` is enabled by default (`CONFIG_LV_FONT_MONTSERRAT_14=y`). For crisper big text enable a real size in `sdkconfig`/`sdkconfig.defaults.esp32s3` (e.g. `CONFIG_LV_FONT_MONTSERRAT_28=y`) and set it via `lv_obj_set_style_text_font(obj, &lv_font_montserrat_28, 0)`. `transform_scale` produces softer (bilinear) glyphs but needs no rebuild.
+- **`lv_obj_set_style_transform_rotation` per widget.** Works visually for a couple of short labels, but in LVGL v9.1 the dirty-area tracking for transformed widgets does not cover the actual rotated render region for long-text labels. Symptoms: stale-pixel bands across the middle of the user view ("black square"), and eventually the render task wedges. Hours of debugging confirmed this — see commit history. **Don't use widget transform_rotation for our rotated UI.**
+- **`LV_OBJ_FLAG_OVERFLOW_VISIBLE` on `lv_scr_act()`.** Setting the flag on the *screen object* causes the entire splash to render as black. Setting it on a regular `lv_obj` child is fine.
+- **`lv_refr_now()` inside `splash_tick`.** Hangs the LVGL render task indefinitely when many transformed widgets are present. The async render driven by `lv_timer_handler` is fine.
+- **Fonts.** Only `lv_font_montserrat_14` is enabled by default. For crisper bigger text enable a specific size in `sdkconfig.defaults.esp32s3` (e.g. `CONFIG_LV_FONT_MONTSERRAT_28=y`) rather than scaling via transforms.
 
 ### Splash screen architecture (cross-reference)
 
-- Native canvas covers `lv_scr_act()` with the splash composed of a child `lv_obj` (`splash_root`).
-- Logo: pre-rotated `logo90c`, placed at `(30, 22)` native — that maps to user-view `(22, 30)` for a 596 × 182 image centered horizontally with a 30 px top margin.
-- Label: `lv_label` with `transform_rotation=2700` and `transform_scale=512` (2x), positioned via the user→native mapping so it sits centered below the logo.
-- The splash is created in `app_main` before `z80_task`'s `trs_screen.init()`; an `lvgl_pump_task` drives `lv_timer_handler` while it's up, then exits when the user presses ENTER. After that, `ui_task` takes over and the TRS-80 owns the screen.
+- LVGL is set up with `LV_DISPLAY_ROTATION_270` so widgets render in landscape (640 × 480). Pixel rotation happens in `example_lvgl_flush_cb` via `lv_draw_sw_rotate`.
+- `splash_root` is a full-screen 640 × 480 black `lv_obj`. The logo is `main/logo.c` (596 × 182 landscape) placed at `(22, 30)` in landscape coords for the BT-pairing screen, and scaled 50% to `(171, 5)` when we transition to the compact (Wi-Fi / RetroStore) layout. No widget transforms.
+- Status / list rows / subtext are plain `lv_label`s at `x=20`, `lv_obj_set_width(.., 600)` for wrapping.
+- The splash is created in `app_main` before `z80_task`'s `trs_screen.init()`; an `lvgl_pump_task` drives `lv_timer_handler` while it's up, then exits when the user dismisses. After that, `ui_task` takes over and the TRS-80 owns the screen.
 
-Files: `main/splash.{c,h}`, `main/logo90c.c`, `main/main.cpp` (`app_main`, `lvgl_pump_task`).
+Files: `main/splash.{c,h}`, `main/logo.c`, `main/LVGL_Driver/LVGL_Driver.c`, `main/main.cpp` (`app_main`, `lvgl_pump_task`).
 
 ## SDK config highlights — `sdkconfig`
 

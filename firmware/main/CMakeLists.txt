@@ -1,7 +1,8 @@
 idf_component_register(
                         SRCS  "main.cpp"
                               "splash.c"
-                              "logo90c.c"
+                              "wifi_manager.c"
+                              "logoc.c"
                               "EXIO/TCA9554PWR.c"
                               "LCD_Driver/ST7701S.c"
                               "LVGL_Driver/LVGL_Driver.c"
@@ -14,4 +15,4 @@ idf_component_register(
                                      "./I2C_Driver"
                                      "./Buzzer"
                                      "."
-                        REQUIRES ptrs trs-lib esp_driver_spi esp_lcd nvs_flash bt_keyboard driver bt)
+                        REQUIRES ptrs trs-lib retrostore-c-sdk esp_driver_spi esp_lcd nvs_flash bt_keyboard driver bt esp_wifi esp_netif esp_event)

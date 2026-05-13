@@ -4,3 +4,5 @@ log.*.txt
 tags
 .parcel-cache
 *.tar
+.serial.log*
+.serial-logger.pid

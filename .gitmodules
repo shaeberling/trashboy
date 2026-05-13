@@ -4,3 +4,6 @@
 [submodule "firmware/components/trs-io/TRS-IO"]
 	path = firmware/components/trs-io/TRS-IO
 	url = https://github.com/apuder/TRS-IO.git
+[submodule "firmware/components/retrostore-c-sdk"]
+	path = firmware/components/retrostore-c-sdk
+	url = https://github.com/shaeberling/retrostore-c-sdk
