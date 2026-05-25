@@ -15,4 +15,4 @@ idf_component_register(
                                      "./I2C_Driver"
                                      "./Buzzer"
                                      "."
-                        REQUIRES ptrs trs-lib retrostore-c-sdk esp_driver_spi esp_lcd nvs_flash bt_keyboard driver bt esp_wifi esp_netif esp_event)
+                        REQUIRES ptrs trs-lib retrostore-c-sdk esp_driver_spi esp_driver_ledc esp_lcd nvs_flash bt_keyboard driver bt esp_wifi esp_netif esp_event)

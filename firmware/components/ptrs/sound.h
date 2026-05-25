@@ -20,7 +20,7 @@
 #define SPEED_1500    1
 #define SPEED_250     2
 
-#define SDM_AUDIO_PIN 16
+#define SDM_AUDIO_PIN GPIO_NUM_16
 
 typedef uint8_t Uchar;
 typedef uint8_t Uint8;

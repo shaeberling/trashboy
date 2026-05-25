@@ -36,7 +36,12 @@ idf_component_register(SRC_DIRS ${TRS_IO}/libsmb2/lib
                                    ${TRS_IO}/trs-io/xray-load.bin
                        REQUIRES main
                                 esp_http_client
-                                fatfs)
+                                fatfs
+                                esp_driver_uart
+                                esp_driver_gpio
+                                esp_driver_spi
+                                esp_driver_sdmmc
+                                esp_driver_sdspi)
 
 # Force static linking of modules
 set_property(TARGET ${COMPONENT_LIB} APPEND PROPERTY INTERFACE_LINK_LIBRARIES "-u theTrsIOCoreModule")
