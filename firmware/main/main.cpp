@@ -246,6 +246,25 @@ static void run_wifi_setup() {
   splash_set_status("Initializing Wi-Fi...");
   wifi_mgr_init();
 
+#if CONFIG_TRASHBOY_WIFI_USE_PRESET
+  // Developer toggle (CONFIG_TRASHBOY_WIFI_USE_PRESET=y): connect to the
+  // SSID/password baked into the firmware. Falls through to the normal
+  // stored-creds / picker flow on failure so testing still has a recovery
+  // path if the preset is wrong.
+  {
+    const char *preset_ssid = CONFIG_TRASHBOY_WIFI_PRESET_SSID;
+    const char *preset_pass = CONFIG_TRASHBOY_WIFI_PRESET_PASSWORD;
+    if (preset_ssid[0] != '\0') {
+      ESP_LOGI(TAG, "Using preset Wi-Fi credentials for '%s'", preset_ssid);
+      if (try_connect(preset_ssid, preset_pass)) return;
+      splash_set_status("Preset Wi-Fi failed, falling back to picker...");
+      vTaskDelay(pdMS_TO_TICKS(1500));
+    } else {
+      ESP_LOGW(TAG, "CONFIG_TRASHBOY_WIFI_USE_PRESET=y but SSID is empty");
+    }
+  }
+#endif
+
   // 1) Try stored credentials first.
   {
     char ssid[WIFI_MGR_SSID_LEN];
@@ -550,6 +569,7 @@ void keyb_task(void* arg) {
   if (bt_keyboard.setup(pairing_handler, keyboard_connected_handler,
                         keyboard_lost_connection_handler)) { // Must be called once
 
+#if CONFIG_TRASHBOY_BT_SCAN_ENABLED
     // Try to auto-connect to previously paired keyboard, retry continuously if paired but not connected
     while (!bt_keyboard.is_connected()) {
       bt_keyboard.auto_connect_bonded_device();
@@ -575,9 +595,19 @@ void keyb_task(void* arg) {
         }
       }
     }
+#else
+    // Developer toggle (CONFIG_TRASHBOY_BT_SCAN_ENABLED=n): skip the
+    // connect/scan loop. Make one best-effort auto-connect attempt so a
+    // paired keyboard still works if present, then continue regardless.
+    ESP_LOGW(TAG, "Bluetooth keyboard scanning disabled "
+                  "(CONFIG_TRASHBOY_BT_SCAN_ENABLED=n)");
+    bt_keyboard.auto_connect_bonded_device();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+#endif
 
     splash_set_paired();
 
+#if CONFIG_TRASHBOY_BT_SCAN_ENABLED
     // Wait for the user to press ENTER (HID 0x28) or keypad ENTER (0x58)
     // to dismiss the splash and let the TRS-80 boot.
     while (true) {
@@ -585,6 +615,11 @@ void keyb_task(void* arg) {
       if (!bt_keyboard.wait_for_low_event(inf, pdMS_TO_TICKS(100))) continue;
       if (key_report_contains(inf, 0x28) || key_report_contains(inf, 0x58)) break;
     }
+#else
+    // Without a keyboard to press ENTER, just give the splash a moment of
+    // visibility, then proceed automatically.
+    vTaskDelay(pdMS_TO_TICKS(1500));
+#endif
 
     // Drive the splash through Wi-Fi setup (scan -> pick -> password ->
     // connect, or auto-connect from NVS-stored credentials).

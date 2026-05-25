@@ -1,0 +1,39 @@
+menu "Trashboy"
+
+config TRASHBOY_BT_SCAN_ENABLED
+    bool "Enable Bluetooth keyboard scanning on boot"
+    default y
+    help
+      When enabled (production default), the boot flow loops trying to
+      auto-connect a paired Bluetooth HID keyboard and falls back to
+      pairing-scan (devices_scan), then waits for the user to press ENTER
+      on the splash screen to continue.
+
+      Disable this for testing on hardware where no Bluetooth keyboard is
+      paired or present: boot will skip both the scan loop and the splash
+      ENTER-wait so it proceeds without user interaction.
+
+config TRASHBOY_WIFI_USE_PRESET
+    bool "Use preset Wi-Fi credentials instead of the interactive dialog"
+    default n
+    help
+      When enabled, the Wi-Fi setup step at boot tries to connect to the
+      SSID/password configured below before showing the on-device network
+      picker. If the preset fails to connect, the normal interactive
+      scan/pick/password dialog is used as a fallback.
+
+      Intended for developer iteration so a board can boot straight onto
+      a known test network without keyboard interaction. Credentials are
+      compiled into the firmware image -- do not enable for shipped builds.
+
+config TRASHBOY_WIFI_PRESET_SSID
+    string "Preset Wi-Fi SSID"
+    depends on TRASHBOY_WIFI_USE_PRESET
+    default ""
+
+config TRASHBOY_WIFI_PRESET_PASSWORD
+    string "Preset Wi-Fi password"
+    depends on TRASHBOY_WIFI_USE_PRESET
+    default ""
+
+endmenu
