@@ -8,10 +8,12 @@
 
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
 
+#include "Buzzer/Buzzer.h"
 #include "Touch_Driver/Touch.h"
 
 static const char *TAG = "touch_test";
@@ -46,6 +48,43 @@ typedef struct {
 
 static firework_burst_t s_bursts[MAX_BURSTS_IN_FLIGHT] = {0};
 static bool s_touch_ok = false;
+
+// ---------- Buzzer feedback -------------------------------------------------
+//
+// The TCA9554 EXIO 8 controls the on-board active buzzer (see
+// main/Buzzer/Buzzer.{h,c} and the [[waveshare-2.8b-pinout]] memory). We
+// pulse it for BUZZ_DURATION_MS on every press, scheduled off via a one-
+// shot esp_timer so the LV_EVENT_PRESSED handler returns immediately and
+// the LVGL pump keeps animating bursts without stuttering.
+
+#define BUZZ_DURATION_MS 50
+
+static esp_timer_handle_t s_buzz_off_timer = NULL;
+
+static void buzz_off_cb(void *arg)
+{
+    (void) arg;
+    Buzzer_Off();
+}
+
+static void buzz_init(void)
+{
+    const esp_timer_create_args_t args = {
+        .callback = buzz_off_cb,
+        .name = "buzz_off",
+    };
+    esp_timer_create(&args, &s_buzz_off_timer);
+}
+
+// Re-arms the off-timer each call, so rapid taps keep the buzzer on
+// continuously rather than chattering between on/off on every event.
+static void buzz_pulse(void)
+{
+    if (s_buzz_off_timer == NULL) return;
+    esp_timer_stop(s_buzz_off_timer);    // no-op if not running
+    Buzzer_On();
+    esp_timer_start_once(s_buzz_off_timer, BUZZ_DURATION_MS * 1000ULL);
+}
 
 // Bright primary-ish palette; cycled through bursts so consecutive presses
 // don't all look the same.
@@ -191,6 +230,7 @@ static void on_screen_pressed(lv_event_t *e)
 
     lv_obj_t *parent = (lv_obj_t *) lv_event_get_current_target(e);
     spawn_burst(parent, (int) p.x, (int) p.y);
+    buzz_pulse();
 
     ESP_LOGI(TAG, "burst @ (%d, %d)", (int) p.x, (int) p.y);
 }
@@ -208,6 +248,8 @@ static void touch_test_pump_task(void *arg)
 
 void touch_test_run(void)
 {
+    buzz_init();
+
     if (Touch_Init() == ESP_OK) {
         s_touch_ok = true;
         lv_indev_t *indev = lv_indev_create();
