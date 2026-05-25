@@ -36,4 +36,15 @@ config TRASHBOY_WIFI_PRESET_PASSWORD
     depends on TRASHBOY_WIFI_USE_PRESET
     default ""
 
+config TRASHBOY_TOUCH_TEST_MODE
+    bool "Boot into the GT911 touch test screen"
+    default n
+    help
+      When enabled, the firmware boots straight into a self-contained test
+      screen ("Touch Test" label, with a coloured circle painted at every
+      touch press) and never reaches the normal BT / Wi-Fi / splash /
+      RetroStore flow. Intended for bring-up of the touch stack on the
+      Waveshare ESP32-S3-Touch-LCD-2.8B module (GT911 over I2C, TP_INT on
+      GPIO 16, TP_RST via TCA9554 EXIO2).
+
 endmenu

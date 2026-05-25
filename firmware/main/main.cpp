@@ -18,6 +18,7 @@ extern "C" {
 #include "trs-lib.h"
 #include "splash.h"
 #include "wifi_manager.h"
+#include "touch_test.h"
 }
 #include "settings.h"
 #include "trs_memory.h"
@@ -801,6 +802,12 @@ extern "C" void app_main(void)
 
   // Initialize LVGL
   LVGL_Init();
+
+#if CONFIG_TRASHBOY_TOUCH_TEST_MODE
+  // Developer toggle: skip the whole BT / Wi-Fi / splash / RetroStore path
+  // and boot straight into the GT911 touch bring-up screen. Never returns.
+  touch_test_run();
+#endif
 
   splash_init();
 

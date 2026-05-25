@@ -20,7 +20,12 @@
 #define SPEED_1500    1
 #define SPEED_250     2
 
-#define SDM_AUDIO_PIN GPIO_NUM_16
+// On the original (no-touch) hardware module SDM audio was wired to GPIO 16.
+// On the Waveshare ESP32-S3-Touch-LCD-2.8B that pin is the GT911 touch
+// interrupt — see Touch_Driver/Touch.h — so SDM was moved to GPIO 4, the
+// only ESP32-S3 GPIO on this board with no strapping role, no peripheral
+// assignment, and no allocation to the LCD / SD / I2C / USB / UART.
+#define SDM_AUDIO_PIN GPIO_NUM_4
 
 typedef uint8_t Uchar;
 typedef uint8_t Uint8;
