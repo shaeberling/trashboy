@@ -22,9 +22,12 @@ esp_err_t mcp23017_init(void);
 // Read the GPIOA port (8 bits). Caller-side: pressed = bit == 0.
 esp_err_t mcp23017_read_a(uint8_t *out);
 
-// Spawn the periodic button-poll task (500 ms cadence). Logs press/release
-// edges for GPA0/GPA1. Returns true on successful task creation.
-bool mcp23017_start_button_task(void);
+// Spawn the button task driven by the MCP23017's INTA pin. Configures
+// the chip for interrupt-on-change across port A and the given ESP32
+// GPIO for a falling-edge interrupt with internal pull-up. The task
+// wakes on each edge, reads GPIOA (which clears the chip-side INT),
+// and logs press/release for GPA0/GPA1.
+bool mcp23017_start_button_task(int int_gpio);
 
 #ifdef __cplusplus
 }

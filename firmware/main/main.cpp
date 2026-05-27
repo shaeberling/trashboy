@@ -799,7 +799,7 @@ extern "C" void app_main(void)
   // Non-fatal: missing chip just means buttons won't work.
   if (mcp23017_probe() == ESP_OK) {
     mcp23017_init();
-    mcp23017_start_button_task();
+    mcp23017_start_button_task(GPIO_NUM_4);  // INTA → GPIO4
   }
 
   // Initialize EXIO (required by LCD)
