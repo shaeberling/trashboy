@@ -13,6 +13,7 @@
 extern "C" {
 #include "TCA9554PWR.h"
 #include "I2C_Driver.h"
+#include "mcp23017.h"
 #include "ST7701S.h"
 #include "LVGL_Driver.h"
 #include "trs-lib.h"
@@ -793,6 +794,13 @@ extern "C" void app_main(void)
 {
   // Initialize I2C (required by EXIO)
   I2C_Init();
+
+  // Probe + configure MCP23017 button expander on the same I2C bus.
+  // Non-fatal: missing chip just means buttons won't work.
+  if (mcp23017_probe() == ESP_OK) {
+    mcp23017_init();
+    mcp23017_start_button_task();
+  }
 
   // Initialize EXIO (required by LCD)
   EXIO_Init();
