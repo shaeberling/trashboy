@@ -4,8 +4,11 @@
 
 #include <math.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
@@ -13,23 +16,32 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 
+#include "LCD_Driver/ST7701S.h"
 #include "Buzzer/Buzzer.h"
 #include "Touch_Driver/Touch.h"
 
 static const char *TAG = "touch_test";
 
-// ---------- Fireworks tuning ------------------------------------------------
+// ---------- Fireworks rendering --------------------------------------------
 //
-// Cost model on this hardware (ESP32-S3 driving a 480x640 RGB panel with
-// LVGL PARTIAL render mode + SW rotation in the flush callback): each
-// particle property change invalidates a small rect that the partial-render
-// pipeline then has to re-rotate and DMA out. So we keep particle count
-// low, use ONE animation timer per burst (not one per particle), and cap
-// the number of bursts in flight.
+// One screen-sized ARGB8888 lv_canvas covers the whole UI. All bursts
+// rasterise their particles into the same canvas via the layer API. We
+// avoid lv_canvas_fill_bg / lv_obj_invalidate (which dirty the WHOLE
+// canvas widget -- 640x480 through the sw-rotate flush path every frame,
+// far too expensive on this hardware). Instead, each frame:
+//
+//   1) erase each particle's last-frame position with opaque black (the
+//      screen bg is black, so an opaque black canvas pixel is visually
+//      indistinguishable from "transparent"),
+//   2) draw the new colored particle,
+//   3) call lv_obj_invalidate_area on ONE bbox enclosing the 8 erase +
+//      8 draw rects per burst.
+//
+// Net cost per burst per frame on this hardware: one small dirty rect
+// (typically a few hundred px square) through one lv_draw_sw_rotate pass.
+// That made 3 simultaneous bursts render smoothly where the previous
+// per-particle-lv_obj approach stuttered at 3.
 
-// Empirically the original 8 / 3 split is the ceiling on this hardware --
-// bumping either past it (tried 12 particles and 5 bursts) causes visible
-// frame stutter on overlapping bursts. Do not raise without re-testing.
 #define PARTICLES_PER_BURST   8
 #define MAX_BURSTS_IN_FLIGHT  3
 #define PARTICLE_SIZE_PX      6
@@ -37,25 +49,28 @@ static const char *TAG = "touch_test";
 #define PARTICLE_MIN_REACH_PX 40
 #define PARTICLE_MAX_REACH_PX 80
 
+// LVGL sees the panel as landscape after the rotation set in LVGL_Init().
+#define CANVAS_W EXAMPLE_LCD_V_RES   // 640
+#define CANVAS_H EXAMPLE_LCD_H_RES   // 480
+
 typedef struct {
-    lv_obj_t *dots[PARTICLES_PER_BURST];
-    int16_t   origin_x;
-    int16_t   origin_y;
-    int16_t   dx[PARTICLES_PER_BURST];  // pre-baked total displacement
-    int16_t   dy[PARTICLES_PER_BURST];
-    bool      active;
+    int16_t  origin_x;
+    int16_t  origin_y;
+    int16_t  dx[PARTICLES_PER_BURST];
+    int16_t  dy[PARTICLES_PER_BURST];
+    int16_t  prev_x[PARTICLES_PER_BURST];   // last-frame screen position
+    int16_t  prev_y[PARTICLES_PER_BURST];   // (used to erase before redraw)
+    uint32_t color[PARTICLES_PER_BURST];
+    bool     active;
 } firework_burst_t;
 
 static firework_burst_t s_bursts[MAX_BURSTS_IN_FLIGHT] = {0};
 static bool s_touch_ok = false;
 
+static lv_obj_t *s_canvas = NULL;
+static void     *s_canvas_buf = NULL;
+
 // ---------- Buzzer feedback -------------------------------------------------
-//
-// The TCA9554 EXIO 8 controls the on-board active buzzer (see
-// main/Buzzer/Buzzer.{h,c} and the [[waveshare-2.8b-pinout]] memory). We
-// pulse it for BUZZ_DURATION_MS on every press, scheduled off via a one-
-// shot esp_timer so the LV_EVENT_PRESSED handler returns immediately and
-// the LVGL pump keeps animating bursts without stuttering.
 
 #define BUZZ_DURATION_MS 50
 
@@ -76,27 +91,17 @@ static void buzz_init(void)
     esp_timer_create(&args, &s_buzz_off_timer);
 }
 
-// Re-arms the off-timer each call, so rapid taps keep the buzzer on
-// continuously rather than chattering between on/off on every event.
 static void buzz_pulse(void)
 {
     if (s_buzz_off_timer == NULL) return;
-    esp_timer_stop(s_buzz_off_timer);    // no-op if not running
+    esp_timer_stop(s_buzz_off_timer);
     Buzzer_On();
     esp_timer_start_once(s_buzz_off_timer, BUZZ_DURATION_MS * 1000ULL);
 }
 
-// Bright primary-ish palette; cycled through bursts so consecutive presses
-// don't all look the same.
 static const uint32_t s_palette[] = {
-    0xFF4040,  // red
-    0xFFA040,  // orange
-    0xFFFF40,  // yellow
-    0x40FF40,  // green
-    0x40FFFF,  // cyan
-    0x4080FF,  // blue
-    0xC040FF,  // purple
-    0xFFFFFF,  // white
+    0xFF4040, 0xFFA040, 0xFFFF40, 0x40FF40,
+    0x40FFFF, 0x4080FF, 0xC040FF, 0xFFFFFF,
 };
 #define PALETTE_LEN (sizeof(s_palette) / sizeof(s_palette[0]))
 static uint8_t s_palette_offset = 0;
@@ -118,44 +123,139 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 
 // ---------- Firework burst --------------------------------------------------
 
-// LVGL animation tick. v is the 0..1000 progress passed via set_values().
-// Updates every particle in the burst from its origin toward origin + d*v.
+// 1 px AA padding around each drawn particle.
+#define ERASE_PAD 1
+#define ERASE_RECT_SIZE (PARTICLE_SIZE_PX + 2 * ERASE_PAD)
+
+// Animation tick. v is 0..1000 burst progress. Two-pass per frame:
+//   1) erase each particle's last-frame position with opaque black (works
+//      because the screen bg is black; the canvas pixel becomes opaque
+//      black and renders as black on the panel),
+//   2) draw the new colored particle at the current position.
+// Then invalidate ONE bbox covering both old and new positions so LVGL
+// re-pushes just that area through the sw-rotate flush path.
 static void burst_anim_exec_cb(void *var, int32_t v)
 {
     firework_burst_t *b = (firework_burst_t *) var;
-    if (!b->active) return;
+    if (!b->active || s_canvas == NULL) return;
 
-    // Map 0..1000 -> 0..LV_OPA_COVER for the fade, then complement so the
-    // particles fade out as they fly outward. Computed once per frame and
-    // reused for all particles.
     const lv_opa_t opa = (lv_opa_t) (LV_OPA_COVER - (LV_OPA_COVER * v) / 1000);
 
+    lv_layer_t layer;
+    lv_canvas_init_layer(s_canvas, &layer);
+
+    lv_draw_rect_dsc_t erase_dsc;
+    lv_draw_rect_dsc_init(&erase_dsc);
+    erase_dsc.bg_color = lv_color_black();
+    erase_dsc.bg_opa = LV_OPA_COVER;
+    erase_dsc.radius = LV_RADIUS_CIRCLE;
+    erase_dsc.border_width = 0;
+
+    lv_draw_rect_dsc_t draw_dsc;
+    lv_draw_rect_dsc_init(&draw_dsc);
+    draw_dsc.bg_opa = opa;
+    draw_dsc.radius = LV_RADIUS_CIRCLE;
+    draw_dsc.border_width = 0;
+
+    int32_t min_x = INT32_MAX, min_y = INT32_MAX;
+    int32_t max_x = INT32_MIN, max_y = INT32_MIN;
+
     for (int i = 0; i < PARTICLES_PER_BURST; i++) {
-        lv_obj_t *dot = b->dots[i];
-        if (dot == NULL) continue;
-        const int32_t x = b->origin_x + (b->dx[i] * v) / 1000;
-        const int32_t y = b->origin_y + (b->dy[i] * v) / 1000;
-        lv_obj_set_pos(dot, x - PARTICLE_SIZE_PX / 2, y - PARTICLE_SIZE_PX / 2);
-        lv_obj_set_style_bg_opa(dot, opa, 0);
+        // Erase the previous frame's particle (with AA padding).
+        lv_area_t erase = {
+            .x1 = b->prev_x[i] - PARTICLE_SIZE_PX / 2 - ERASE_PAD,
+            .y1 = b->prev_y[i] - PARTICLE_SIZE_PX / 2 - ERASE_PAD,
+        };
+        erase.x2 = erase.x1 + ERASE_RECT_SIZE - 1;
+        erase.y2 = erase.y1 + ERASE_RECT_SIZE - 1;
+        lv_draw_rect(&layer, &erase_dsc, &erase);
+
+        // Draw the new particle.
+        const int32_t px = b->origin_x + (b->dx[i] * v) / 1000;
+        const int32_t py = b->origin_y + (b->dy[i] * v) / 1000;
+        draw_dsc.bg_color = lv_color_hex(b->color[i]);
+
+        lv_area_t coords;
+        coords.x1 = px - PARTICLE_SIZE_PX / 2;
+        coords.y1 = py - PARTICLE_SIZE_PX / 2;
+        coords.x2 = coords.x1 + PARTICLE_SIZE_PX - 1;
+        coords.y2 = coords.y1 + PARTICLE_SIZE_PX - 1;
+        lv_draw_rect(&layer, &draw_dsc, &coords);
+
+        // Union of erase + draw rects feeds the per-burst dirty box.
+        if (erase.x1 < min_x) min_x = erase.x1;
+        if (erase.y1 < min_y) min_y = erase.y1;
+        if (erase.x2 > max_x) max_x = erase.x2;
+        if (erase.y2 > max_y) max_y = erase.y2;
+        if (coords.x1 < min_x) min_x = coords.x1;
+        if (coords.y1 < min_y) min_y = coords.y1;
+        if (coords.x2 > max_x) max_x = coords.x2;
+        if (coords.y2 > max_y) max_y = coords.y2;
+
+        b->prev_x[i] = (int16_t) px;
+        b->prev_y[i] = (int16_t) py;
     }
+
+    lv_canvas_finish_layer(s_canvas, &layer);
+
+    // Canvas is at (0,0) screen-sized: canvas-local coords == screen coords.
+    lv_area_t dirty = {
+        .x1 = min_x - 1,
+        .y1 = min_y - 1,
+        .x2 = max_x + 1,
+        .y2 = max_y + 1,
+    };
+    lv_obj_invalidate_area(s_canvas, &dirty);
 }
 
-// Cleans the burst up when its animation finishes.
 static void burst_anim_completed_cb(lv_anim_t *a)
 {
     firework_burst_t *b = (firework_burst_t *) a->var;
-    for (int i = 0; i < PARTICLES_PER_BURST; i++) {
-        if (b->dots[i] != NULL) {
-            lv_obj_delete(b->dots[i]);
-            b->dots[i] = NULL;
+
+    // Erase the final frame's particles so nothing lingers between bursts.
+    if (s_canvas != NULL) {
+        lv_layer_t layer;
+        lv_canvas_init_layer(s_canvas, &layer);
+
+        lv_draw_rect_dsc_t erase_dsc;
+        lv_draw_rect_dsc_init(&erase_dsc);
+        erase_dsc.bg_color = lv_color_black();
+        erase_dsc.bg_opa = LV_OPA_COVER;
+        erase_dsc.radius = LV_RADIUS_CIRCLE;
+        erase_dsc.border_width = 0;
+
+        int32_t min_x = INT32_MAX, min_y = INT32_MAX;
+        int32_t max_x = INT32_MIN, max_y = INT32_MIN;
+
+        for (int i = 0; i < PARTICLES_PER_BURST; i++) {
+            lv_area_t erase = {
+                .x1 = b->prev_x[i] - PARTICLE_SIZE_PX / 2 - ERASE_PAD,
+                .y1 = b->prev_y[i] - PARTICLE_SIZE_PX / 2 - ERASE_PAD,
+            };
+            erase.x2 = erase.x1 + ERASE_RECT_SIZE - 1;
+            erase.y2 = erase.y1 + ERASE_RECT_SIZE - 1;
+            lv_draw_rect(&layer, &erase_dsc, &erase);
+
+            if (erase.x1 < min_x) min_x = erase.x1;
+            if (erase.y1 < min_y) min_y = erase.y1;
+            if (erase.x2 > max_x) max_x = erase.x2;
+            if (erase.y2 > max_y) max_y = erase.y2;
         }
+
+        lv_canvas_finish_layer(s_canvas, &layer);
+
+        lv_area_t dirty = {
+            .x1 = min_x - 1,
+            .y1 = min_y - 1,
+            .x2 = max_x + 1,
+            .y2 = max_y + 1,
+        };
+        lv_obj_invalidate_area(s_canvas, &dirty);
     }
+
     b->active = false;
 }
 
-// Find a free burst slot, or NULL if all MAX_BURSTS_IN_FLIGHT are still
-// running. The caller drops the press in that case (better than degrading
-// frame rate by piling on more particles).
 static firework_burst_t *acquire_burst_slot(void)
 {
     for (int i = 0; i < MAX_BURSTS_IN_FLIGHT; i++) {
@@ -164,25 +264,38 @@ static firework_burst_t *acquire_burst_slot(void)
     return NULL;
 }
 
-static void spawn_burst(lv_obj_t *parent, int x, int y)
+static void canvas_init(lv_obj_t *parent)
 {
-    firework_burst_t *b = acquire_burst_slot();
-    if (b == NULL) {
-        // Too many concurrent bursts -- silently drop this one. With
-        // BURST_DURATION_MS=700 a finger would have to drum at >4 Hz to
-        // notice.
+    const size_t buf_sz = (size_t) CANVAS_W * CANVAS_H * 4;
+    s_canvas_buf = heap_caps_malloc(buf_sz, MALLOC_CAP_SPIRAM);
+    if (s_canvas_buf == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate %u-byte canvas buffer",
+                 (unsigned) buf_sz);
         return;
     }
+    // Fully transparent ARGB8888 = all bytes zero.
+    memset(s_canvas_buf, 0, buf_sz);
+
+    s_canvas = lv_canvas_create(parent);
+    lv_canvas_set_buffer(s_canvas, s_canvas_buf,
+                         CANVAS_W, CANVAS_H, LV_COLOR_FORMAT_ARGB8888);
+    lv_obj_remove_style_all(s_canvas);
+    lv_obj_set_size(s_canvas, CANVAS_W, CANVAS_H);
+    lv_obj_set_pos(s_canvas, 0, 0);
+    lv_obj_remove_flag(s_canvas, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(s_canvas, LV_OBJ_FLAG_SCROLLABLE);
+}
+
+static void spawn_burst(int x, int y)
+{
+    firework_burst_t *b = acquire_burst_slot();
+    if (b == NULL || s_canvas == NULL) return;
 
     b->active = true;
     b->origin_x = (int16_t) x;
     b->origin_y = (int16_t) y;
     s_palette_offset = (uint8_t)(s_palette_offset + 1);
 
-    // Hand out the particle directions evenly around the unit circle with
-    // a small angular jitter and per-particle distance jitter so the burst
-    // looks organic rather than mechanical. cosf/sinf are cheap on the
-    // S3 FPU and run only PARTICLES_PER_BURST times per press.
     const float two_pi = 6.28318530718f;
     for (int i = 0; i < PARTICLES_PER_BURST; i++) {
         const float base_angle = (two_pi * (float) i) / (float) PARTICLES_PER_BURST;
@@ -192,22 +305,15 @@ static void spawn_burst(lv_obj_t *parent, int x, int y)
                           (int)(esp_random() % (PARTICLE_MAX_REACH_PX - PARTICLE_MIN_REACH_PX + 1));
         b->dx[i] = (int16_t)(cosf(angle) * reach);
         b->dy[i] = (int16_t)(sinf(angle) * reach);
-
-        lv_obj_t *dot = lv_obj_create(parent);
-        lv_obj_remove_style_all(dot);
-        lv_obj_set_size(dot, PARTICLE_SIZE_PX, PARTICLE_SIZE_PX);
-        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-        const uint32_t hex = s_palette[(s_palette_offset + i) % PALETTE_LEN];
-        lv_obj_set_style_bg_color(dot, lv_color_hex(hex), 0);
-        lv_obj_set_pos(dot, x - PARTICLE_SIZE_PX / 2, y - PARTICLE_SIZE_PX / 2);
-        lv_obj_remove_flag(dot, LV_OBJ_FLAG_CLICKABLE);
-        b->dots[i] = dot;
+        b->color[i] = s_palette[(s_palette_offset + i) % PALETTE_LEN];
+        // First-frame erase target == origin; nothing's there yet so it's
+        // a benign overwrite of already-black pixels.
+        b->prev_x[i] = b->origin_x;
+        b->prev_y[i] = b->origin_y;
     }
 
-    // One animation per burst, NOT per particle. The exec_cb walks all
-    // particles each tick -- with PARTICLES_PER_BURST=8 and 3 concurrent
-    // bursts, that's ~24 lv_obj_set_pos calls per LVGL tick worst-case.
+    burst_anim_exec_cb(b, 0);
+
     lv_anim_t a;
     lv_anim_init(&a);
     lv_anim_set_var(&a, b);
@@ -223,20 +329,18 @@ static void spawn_burst(lv_obj_t *parent, int x, int y)
 
 static void on_screen_pressed(lv_event_t *e)
 {
+    (void) e;
     lv_indev_t *indev = lv_indev_active();
     if (indev == NULL) return;
     lv_point_t p;
     lv_indev_get_point(indev, &p);
 
-    lv_obj_t *parent = (lv_obj_t *) lv_event_get_current_target(e);
-    spawn_burst(parent, (int) p.x, (int) p.y);
+    spawn_burst((int) p.x, (int) p.y);
     buzz_pulse();
 
     ESP_LOGI(TAG, "burst @ (%d, %d)", (int) p.x, (int) p.y);
 }
 
-// Dedicated LVGL pump: the existing main pump in main.cpp is wired into
-// the splash teardown logic we are deliberately bypassing in test mode.
 static void touch_test_pump_task(void *arg)
 {
     (void) arg;
@@ -263,9 +367,9 @@ void touch_test_run(void)
     lv_obj_t *scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-    // Stop the screen from interpreting held presses as scroll drags
-    // (otherwise the side scrollbar fades in on every long touch).
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    canvas_init(scr);
 
     lv_obj_t *label = lv_label_create(scr);
     lv_label_set_text(label, "Touch Test");
@@ -278,10 +382,10 @@ void touch_test_run(void)
     xTaskCreatePinnedToCore(touch_test_pump_task, "lvgl_pump_test",
                             8192, NULL, 5, NULL, 1);
 
-    ESP_LOGI(TAG, "Touch test running (particles/burst=%d, max bursts=%d, "
-                  "size=%d px, duration=%d ms, touch=%s)",
+    ESP_LOGI(TAG, "Touch test running (canvas=%dx%d ARGB8888, "
+                  "particles/burst=%d, max bursts=%d, touch=%s)",
+             CANVAS_W, CANVAS_H,
              PARTICLES_PER_BURST, MAX_BURSTS_IN_FLIGHT,
-             PARTICLE_SIZE_PX, BURST_DURATION_MS,
              s_touch_ok ? "ok" : "DISABLED");
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
