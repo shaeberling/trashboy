@@ -649,7 +649,7 @@
         "uuid": "1f0bf014-b3ca-458c-bbf9-be25b9651a91"
       }
     ],
-    "used_designators": "U1,CR_L_DOWN1,SW1,CR_R_DOWN1,CR_R_L1-3,CR_R_UP1,CR_R_LEFT1,BTN_L_UP1,CR_R_RIGHT1,1,CR_L_LEFT1,J_BTN_L_BACK1,CR_L_UP1,BTN_META_DOWN1,CR_L_RIGHT1,BTN_META_UP1,#PWR5-31,J2-4,R4,RN1-2,BTN_L_BACK1,BTN_L_DOWN1,BTN_R_BACK1,BTN_R_DOWN1,BTN_R_UP1,C3,J_BTN_R_BACK1",
+    "used_designators": "",
     "variants": []
   },
   "sheets": [
