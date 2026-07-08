@@ -26,6 +26,13 @@ static const char *TAG = "mcp23017";
 static SemaphoreHandle_t s_int_sem;
 static int s_int_gpio = -1;
 
+// Latest snapshot of port A / B pin state, cached by the button task
+// after each successful read. Consumers (e.g. input-test UI) can poll
+// this without doing their own I2C traffic. Aligned uint8_t stores are
+// atomic on the S3 — no lock needed.
+static volatile uint8_t s_last_a = 0xFF;
+static volatile uint8_t s_last_b = 0xFF;
+
 esp_err_t mcp23017_probe(void) {
   uint8_t iodira = 0;
   esp_err_t err = I2C_Read(MCP23017_I2C_ADDR, REG_IODIRA, &iodira, 1);
@@ -67,6 +74,11 @@ esp_err_t mcp23017_read_b(uint8_t *out) {
   return I2C_Read(MCP23017_I2C_ADDR, REG_GPIOB, out, 1);
 }
 
+void mcp23017_get_ports(uint8_t *port_a, uint8_t *port_b) {
+  if (port_a) *port_a = s_last_a;
+  if (port_b) *port_b = s_last_b;
+}
+
 // IOCON=0x40 → BANK=0, MIRROR=1 (INTA/INTB OR'd together so one wire from
 // INTA to the ESP32 covers events on both ports), SEQOP=0, ODR=0
 // (push-pull), INTPOL=0 (active-low). INTCONx=0x00 → interrupt on any
@@ -105,6 +117,8 @@ static void button_task(void *arg) {
   // Establish baseline and clear any latched chip-side INT from boot.
   mcp23017_read_a(&prev_a);
   mcp23017_read_b(&prev_b);
+  s_last_a = prev_a;
+  s_last_b = prev_b;
   for (;;) {
     if (xSemaphoreTake(s_int_sem, portMAX_DELAY) != pdTRUE) {
       continue;
@@ -139,6 +153,8 @@ static void button_task(void *arg) {
       }
       prev_a = cur_a;
       prev_b = cur_b;
+      s_last_a = cur_a;
+      s_last_b = cur_b;
       if (++iters > 16) {
         ESP_LOGW(TAG, "INT (GPIO%d) stuck low after 16 reads — wiring fault?",
                  s_int_gpio);

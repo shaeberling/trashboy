@@ -27,7 +27,7 @@ It runs at original-hardware clock speed — 2.028 MHz for Model III, 4.055 MHz 
 |------|------|
 | **ESP32-S3** with 8 MB octal PSRAM | Runs the emulator, LVGL UI, BT, Wi-Fi, and a 16-bit RGB LCD bus simultaneously. |
 | **ST7701S 480×640 RGB LCD** | Drawn as 640×480 landscape via software rotation in the LVGL flush callback. |
-| **GT911 capacitive touch** | I²C; used for the boot-time touch-test screen. |
+| **GT911 capacitive touch** | I²C; used for the boot-time input-test screen. |
 | **TCA9554PWR I/O expander @ 0x20** | On-board: LCD CS, backlight enable, buzzer reset, etc. |
 | **MCP23017 I/O expander @ 0x21** | Physical board buttons. Interrupt-driven via INTA → GPIO4. |
 | **Bluetooth HID keyboard** | Any generic BT keyboard. Pairing persists in NVS. |
@@ -65,7 +65,7 @@ On WSL2, the USB device routing is its own little adventure — see [`firmware/w
 ├── assets/         Artwork (logo PNGs)
 └── firmware/       ESP-IDF project — the action lives here
     ├── main/         app_main, LVGL UI, splash, Wi-Fi setup,
-    │                 RetroStore browser, MCP23017 buttons, touch test
+    │                 RetroStore browser, MCP23017 buttons, input test
     ├── components/   Z80 core, TRS-80 emulator, BT keyboard,
     │                 RetroStore SDK, TRS-IO, TRS-LIB
     ├── scripts/      Serial logger, asset rotation helpers

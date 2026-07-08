@@ -3,7 +3,7 @@ idf_component_register(
                               "splash.c"
                               "wifi_manager.c"
                               "logoc.c"
-                              "touch_test.c"
+                              "input_test.c"
                               "EXIO/TCA9554PWR.c"
                               "LCD_Driver/ST7701S.c"
                               "LVGL_Driver/LVGL_Driver.c"

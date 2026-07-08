@@ -25,6 +25,11 @@ esp_err_t mcp23017_read_a(uint8_t *out);
 // Read the GPIOB port (8 bits). Caller-side: pressed = bit == 0.
 esp_err_t mcp23017_read_b(uint8_t *out);
 
+// Return the most recent port A/B snapshot cached by the button task.
+// Both pointers may be NULL. Safe to call from any task; the underlying
+// stores are 8-bit aligned so reads/writes are atomic on this MCU.
+void mcp23017_get_ports(uint8_t *port_a, uint8_t *port_b);
+
 // Spawn the button task driven by the MCP23017's INTA pin. Configures
 // the chip for interrupt-on-change across port A and the given ESP32
 // GPIO for a falling-edge interrupt with internal pull-up. The task

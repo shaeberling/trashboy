@@ -1,6 +1,6 @@
-// CONFIG_TRASHBOY_TOUCH_TEST_MODE entry point. See touch_test.h.
+// CONFIG_TRASHBOY_INPUT_TEST_MODE entry point. See input_test.h.
 
-#include "touch_test.h"
+#include "input_test.h"
 
 #include <math.h>
 #include <stdbool.h>
@@ -19,8 +19,9 @@
 #include "LCD_Driver/ST7701S.h"
 #include "Buzzer/Buzzer.h"
 #include "Touch_Driver/Touch.h"
+#include "MCP23017/mcp23017.h"
 
-static const char *TAG = "touch_test";
+static const char *TAG = "input_test";
 
 // ---------- Fireworks rendering --------------------------------------------
 //
@@ -341,7 +342,7 @@ static void on_screen_pressed(lv_event_t *e)
     ESP_LOGI(TAG, "burst @ (%d, %d)", (int) p.x, (int) p.y);
 }
 
-static void touch_test_pump_task(void *arg)
+static void input_test_pump_task(void *arg)
 {
     (void) arg;
     while (true) {
@@ -350,7 +351,81 @@ static void touch_test_pump_task(void *arg)
     }
 }
 
-void touch_test_run(void)
+// ---------- Button-state grid ----------------------------------------------
+//
+// 16 labels ("BTN A0" .. "BTN A7" left column, "BTN B0" .. "BTN B7" right
+// column). Idle color = mid/dark gray. When the MCP23017 reports the pin
+// low, we swap the label's text color to bright green. Polling timer only
+// touches labels whose port bit has changed since the last frame, so it's
+// cheap even at short intervals.
+
+#define BTN_GRID_LABEL_COUNT   16
+#define BTN_TEXT_IDLE_COLOR    0x606060
+#define BTN_TEXT_ACTIVE_COLOR  0x40FF40
+#define BTN_GRID_TOP_Y         70
+#define BTN_GRID_ROW_HEIGHT    48
+#define BTN_GRID_COL_A_X       80
+#define BTN_GRID_COL_B_X       380
+#define BTN_POLL_INTERVAL_MS   30
+
+static lv_obj_t *s_btn_labels[BTN_GRID_LABEL_COUNT] = {0};
+static uint8_t   s_btn_shown_a = 0xFF;
+static uint8_t   s_btn_shown_b = 0xFF;
+
+static void btn_grid_create(lv_obj_t *scr)
+{
+    const lv_color_t idle = lv_color_hex(BTN_TEXT_IDLE_COLOR);
+    for (int i = 0; i < 8; i++) {
+        char txt[8];
+
+        // Port A (left column, indices 0..7).
+        snprintf(txt, sizeof(txt), "BTN A%d", i);
+        lv_obj_t *la = lv_label_create(scr);
+        lv_label_set_text(la, txt);
+        lv_obj_set_style_text_font(la, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(la, idle, 0);
+        lv_obj_set_pos(la, BTN_GRID_COL_A_X, BTN_GRID_TOP_Y + i * BTN_GRID_ROW_HEIGHT);
+        s_btn_labels[i] = la;
+
+        // Port B (right column, indices 8..15).
+        snprintf(txt, sizeof(txt), "BTN B%d", i);
+        lv_obj_t *lb = lv_label_create(scr);
+        lv_label_set_text(lb, txt);
+        lv_obj_set_style_text_font(lb, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(lb, idle, 0);
+        lv_obj_set_pos(lb, BTN_GRID_COL_B_X, BTN_GRID_TOP_Y + i * BTN_GRID_ROW_HEIGHT);
+        s_btn_labels[8 + i] = lb;
+    }
+}
+
+static void btn_grid_poll_cb(lv_timer_t *t)
+{
+    (void) t;
+    uint8_t a = 0xFF, b = 0xFF;
+    mcp23017_get_ports(&a, &b);
+    if (a == s_btn_shown_a && b == s_btn_shown_b) return;
+
+    const uint8_t changed_a = a ^ s_btn_shown_a;
+    const uint8_t changed_b = b ^ s_btn_shown_b;
+    const lv_color_t idle   = lv_color_hex(BTN_TEXT_IDLE_COLOR);
+    const lv_color_t active = lv_color_hex(BTN_TEXT_ACTIVE_COLOR);
+
+    for (int i = 0; i < 8; i++) {
+        const uint8_t mask = 1u << i;
+        if (changed_a & mask) {
+            const lv_color_t c = (a & mask) ? idle : active;  // pressed = bit 0
+            lv_obj_set_style_text_color(s_btn_labels[i], c, 0);
+        }
+        if (changed_b & mask) {
+            const lv_color_t c = (b & mask) ? idle : active;
+            lv_obj_set_style_text_color(s_btn_labels[8 + i], c, 0);
+        }
+    }
+    s_btn_shown_a = a;
+    s_btn_shown_b = b;
+}
+
+void input_test_run(void)
 {
     buzz_init();
 
@@ -372,17 +447,20 @@ void touch_test_run(void)
     canvas_init(scr);
 
     lv_obj_t *label = lv_label_create(scr);
-    lv_label_set_text(label, "Touch Test");
+    lv_label_set_text(label, "Input Test");
     lv_obj_set_style_text_color(label, lv_color_white(), 0);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_24, 0);
     lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
 
+    btn_grid_create(scr);
+    lv_timer_create(btn_grid_poll_cb, BTN_POLL_INTERVAL_MS, NULL);
+
     lv_obj_add_event_cb(scr, on_screen_pressed, LV_EVENT_PRESSED, NULL);
 
-    xTaskCreatePinnedToCore(touch_test_pump_task, "lvgl_pump_test",
+    xTaskCreatePinnedToCore(input_test_pump_task, "lvgl_pump_input_test",
                             8192, NULL, 5, NULL, 1);
 
-    ESP_LOGI(TAG, "Touch test running (canvas=%dx%d ARGB8888, "
+    ESP_LOGI(TAG, "Input test running (canvas=%dx%d ARGB8888, "
                   "particles/burst=%d, max bursts=%d, touch=%s)",
              CANVAS_W, CANVAS_H,
              PARTICLES_PER_BURST, MAX_BURSTS_IN_FLIGHT,
