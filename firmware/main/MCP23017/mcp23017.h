@@ -22,6 +22,9 @@ esp_err_t mcp23017_init(void);
 // Read the GPIOA port (8 bits). Caller-side: pressed = bit == 0.
 esp_err_t mcp23017_read_a(uint8_t *out);
 
+// Read the GPIOB port (8 bits). Caller-side: pressed = bit == 0.
+esp_err_t mcp23017_read_b(uint8_t *out);
+
 // Spawn the button task driven by the MCP23017's INTA pin. Configures
 // the chip for interrupt-on-change across port A and the given ESP32
 // GPIO for a falling-edge interrupt with internal pull-up. The task

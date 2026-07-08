@@ -12,11 +12,16 @@ static const char *TAG = "mcp23017";
 
 // Register map with BANK=0 (power-on default).
 #define REG_IODIRA   0x00  // 1 = input, 0 = output
+#define REG_IODIRB   0x01
 #define REG_GPINTENA 0x04  // 1 = interrupt-on-change enabled for this pin
+#define REG_GPINTENB 0x05
 #define REG_INTCONA  0x08  // 0 = compare against previous, 1 = compare DEFVAL
+#define REG_INTCONB  0x09
 #define REG_IOCON    0x0A  // global config
 #define REG_GPPUA    0x0C  // 1 = 100k pull-up enabled
+#define REG_GPPUB    0x0D
 #define REG_GPIOA    0x12  // read port-A pin state (also clears INT)
+#define REG_GPIOB    0x13
 
 static SemaphoreHandle_t s_int_sem;
 static int s_int_gpio = -1;
@@ -35,20 +40,22 @@ esp_err_t mcp23017_probe(void) {
 }
 
 esp_err_t mcp23017_init(void) {
-  uint8_t v;
-  v = 0xFF;
-  esp_err_t err = I2C_Write(MCP23017_I2C_ADDR, REG_IODIRA, &v, 1);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "IODIRA write failed: %s", esp_err_to_name(err));
-    return err;
+  uint8_t v = 0xFF;
+  esp_err_t err;
+  const struct { uint8_t reg; const char *name; } writes[] = {
+    { REG_IODIRA, "IODIRA" },
+    { REG_IODIRB, "IODIRB" },
+    { REG_GPPUA,  "GPPUA"  },
+    { REG_GPPUB,  "GPPUB"  },
+  };
+  for (size_t i = 0; i < sizeof(writes) / sizeof(writes[0]); i++) {
+    err = I2C_Write(MCP23017_I2C_ADDR, writes[i].reg, &v, 1);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "%s write failed: %s", writes[i].name, esp_err_to_name(err));
+      return err;
+    }
   }
-  v = 0xFF;
-  err = I2C_Write(MCP23017_I2C_ADDR, REG_GPPUA, &v, 1);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "GPPUA write failed: %s", esp_err_to_name(err));
-    return err;
-  }
-  ESP_LOGI(TAG, "configured: port A inputs + pull-ups");
+  ESP_LOGI(TAG, "configured: ports A+B inputs + pull-ups");
   return ESP_OK;
 }
 
@@ -56,28 +63,29 @@ esp_err_t mcp23017_read_a(uint8_t *out) {
   return I2C_Read(MCP23017_I2C_ADDR, REG_GPIOA, out, 1);
 }
 
-// IOCON=0x00 → BANK=0, MIRROR=0, SEQOP=0, ODR=0 (push-pull), INTPOL=0
-// (active-low INTA). INTCONA=0x00 → interrupt on any change. GPINTENA=0xFF
-// → enable interrupt-on-change on all port-A pins.
+esp_err_t mcp23017_read_b(uint8_t *out) {
+  return I2C_Read(MCP23017_I2C_ADDR, REG_GPIOB, out, 1);
+}
+
+// IOCON=0x40 → BANK=0, MIRROR=1 (INTA/INTB OR'd together so one wire from
+// INTA to the ESP32 covers events on both ports), SEQOP=0, ODR=0
+// (push-pull), INTPOL=0 (active-low). INTCONx=0x00 → interrupt on any
+// change. GPINTENx=0xFF → enable interrupt-on-change on every pin of
+// both ports.
 static esp_err_t mcp23017_configure_interrupts(void) {
-  uint8_t v;
-  v = 0x00;
-  esp_err_t err = I2C_Write(MCP23017_I2C_ADDR, REG_IOCON, &v, 1);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "IOCON write failed: %s", esp_err_to_name(err));
-    return err;
-  }
-  v = 0x00;
-  err = I2C_Write(MCP23017_I2C_ADDR, REG_INTCONA, &v, 1);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "INTCONA write failed: %s", esp_err_to_name(err));
-    return err;
-  }
-  v = 0xFF;
-  err = I2C_Write(MCP23017_I2C_ADDR, REG_GPINTENA, &v, 1);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "GPINTENA write failed: %s", esp_err_to_name(err));
-    return err;
+  struct { uint8_t reg; uint8_t val; const char *name; } writes[] = {
+    { REG_IOCON,    0x40, "IOCON"    },
+    { REG_INTCONA,  0x00, "INTCONA"  },
+    { REG_INTCONB,  0x00, "INTCONB"  },
+    { REG_GPINTENA, 0xFF, "GPINTENA" },
+    { REG_GPINTENB, 0xFF, "GPINTENB" },
+  };
+  for (size_t i = 0; i < sizeof(writes) / sizeof(writes[0]); i++) {
+    esp_err_t err = I2C_Write(MCP23017_I2C_ADDR, writes[i].reg, &writes[i].val, 1);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "%s write failed: %s", writes[i].name, esp_err_to_name(err));
+      return err;
+    }
   }
   return ESP_OK;
 }
@@ -93,9 +101,10 @@ static void IRAM_ATTR mcp23017_int_isr(void *arg) {
 
 static void button_task(void *arg) {
   (void) arg;
-  uint8_t prev = 0xFF;
+  uint8_t prev_a = 0xFF, prev_b = 0xFF;
   // Establish baseline and clear any latched chip-side INT from boot.
-  mcp23017_read_a(&prev);
+  mcp23017_read_a(&prev_a);
+  mcp23017_read_b(&prev_b);
   for (;;) {
     if (xSemaphoreTake(s_int_sem, portMAX_DELAY) != pdTRUE) {
       continue;
@@ -109,20 +118,27 @@ static void button_task(void *arg) {
     // until the chip's INT pin actually returns high.
     int iters = 0;
     do {
-      uint8_t cur = 0xFF;
-      esp_err_t err = mcp23017_read_a(&cur);
-      if (err != ESP_OK) {
-        ESP_LOGW(TAG, "read GPIOA in IRQ path failed: %s", esp_err_to_name(err));
+      uint8_t cur_a = 0xFF, cur_b = 0xFF;
+      esp_err_t err_a = mcp23017_read_a(&cur_a);
+      esp_err_t err_b = mcp23017_read_b(&cur_b);
+      if (err_a != ESP_OK || err_b != ESP_OK) {
+        ESP_LOGW(TAG, "read GPIOA/B failed: %s / %s",
+                 esp_err_to_name(err_a), esp_err_to_name(err_b));
         break;
       }
-      uint8_t changed = cur ^ prev;
-      if (changed & 0x01) {
-        ESP_LOGI(TAG, "BTN1 %s", (cur & 0x01) ? "released" : "pressed");
+      uint8_t changed_a = cur_a ^ prev_a;
+      uint8_t changed_b = cur_b ^ prev_b;
+      for (int i = 0; i < 8; i++) {
+        uint8_t mask = 1u << i;
+        if (changed_a & mask) {
+          ESP_LOGI(TAG, "BTN A%d %s", i, (cur_a & mask) ? "released" : "pressed");
+        }
+        if (changed_b & mask) {
+          ESP_LOGI(TAG, "BTN B%d %s", i, (cur_b & mask) ? "released" : "pressed");
+        }
       }
-      if (changed & 0x02) {
-        ESP_LOGI(TAG, "BTN2 %s", (cur & 0x02) ? "released" : "pressed");
-      }
-      prev = cur;
+      prev_a = cur_a;
+      prev_b = cur_b;
       if (++iters > 16) {
         ESP_LOGW(TAG, "INT (GPIO%d) stuck low after 16 reads — wiring fault?",
                  s_int_gpio);
