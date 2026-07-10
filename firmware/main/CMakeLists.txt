@@ -5,6 +5,7 @@ idf_component_register(
                               "wifi_manager.c"
                               "logoc.c"
                               "input_test.c"
+                              "input_test_sound.cpp"
                               "EXIO/TCA9554PWR.c"
                               "LCD_Driver/ST7701S.c"
                               "LVGL_Driver/LVGL_Driver.c"

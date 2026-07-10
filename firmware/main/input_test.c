@@ -20,6 +20,7 @@
 #include "Buzzer/Buzzer.h"
 #include "Touch_Driver/Touch.h"
 #include "MCP23017/mcp23017.h"
+#include "input_test_sound.h"
 
 static const char *TAG = "input_test";
 
@@ -407,6 +408,9 @@ static void btn_grid_poll_cb(lv_timer_t *t)
 
     const uint8_t changed_a = a ^ s_btn_shown_a;
     const uint8_t changed_b = b ^ s_btn_shown_b;
+    // Bits that just went 0 (pull-up released -> grounded), i.e. fresh presses.
+    const uint8_t pressed_a = changed_a & ~a;
+    const uint8_t pressed_b = changed_b & ~b;
     const lv_color_t idle   = lv_color_hex(BTN_TEXT_IDLE_COLOR);
     const lv_color_t active = lv_color_hex(BTN_TEXT_ACTIVE_COLOR);
 
@@ -423,11 +427,19 @@ static void btn_grid_poll_cb(lv_timer_t *t)
     }
     s_btn_shown_a = a;
     s_btn_shown_b = b;
+
+    // Speaker blip on any fresh press (releases stay silent). Touch
+    // presses keep the TCA9554 buzzer; physical buttons get the real
+    // speaker via the SDM sound path.
+    if (pressed_a || pressed_b) {
+        input_sound_beep();
+    }
 }
 
 void input_test_run(void)
 {
     buzz_init();
+    input_sound_init();  // SDM speaker on GPIO4 for button-press blips
 
     if (Touch_Init() == ESP_OK) {
         s_touch_ok = true;
