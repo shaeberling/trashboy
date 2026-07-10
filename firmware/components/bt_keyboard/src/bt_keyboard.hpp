@@ -104,13 +104,7 @@ public:
     KeyModifier modifier;
   };
 
-  BTKeyboard() : num_bt_scan_results_(0), num_ble_scan_results_(0), 
-                 last_ch_(0), repeat_period_(0), caps_lock_(false) {
-    // Initialize key tracking: all slots start as available (empty)
-    for (int i = 0; i < MAX_KEY_DATA_SIZE; i++) {
-      key_avail_[i] = true;
-    }
-  }
+  BTKeyboard() : num_bt_scan_results_(0), num_ble_scan_results_(0) {}
 
   bool setup(PairingHandler        *pairing_handler         = nullptr,
              GotConnectionHandler  *got_connection_handler  = nullptr,
@@ -120,52 +114,14 @@ public:
 
   inline uint8_t get_battery_level() { return battery_level_; }
   inline bool    is_connected() { return connected_; }
-  inline bool    wait_for_low_event(KeyInfo &inf, TickType_t duration = portMAX_DELAY) {
-    return xQueueReceive(event_queue_, &inf, duration);
-  }
 
-  /**
-   * @brief Wait for and return an assembled ASCII character from keyboard input
-   * 
-   * Processes USB HID keyboard events and returns ASCII characters with proper
-   * handling of modifiers and special keys. Supports both blocking and non-blocking modes.
-   * 
-   * Supported ASCII characters:
-   * - Letters: a-z (with Shift → A-Z)
-   * - Numbers: 0-9 with shifted symbols: !@#$%^&*()
-   * - Special characters: -_=+[{]}\\|;:'\"`~,<.>/?
-   * 
-   * Supported special keys:
-   * - ESC (0x1B) - Escape key
-   * - ENTER (0x0D) - Return/Enter key
-   * - BACKSPACE (0x08) - Backspace key
-   * - DELETE (0x7F) - Delete key
-   * - TAB (0x09) - Tab key
-   * - SPACE (0x20) - Space key
-   * - Function keys: F1-F12 (encoded as 0x81-0x8E)
-   * - Arrow keys: Up, Down, Left, Right (encoded as 0x98, 0x97, 0x96, 0x95)
-   * - Navigation: Home, End, PageUp, PageDown, Insert
-   * - Special: PrintScreen, ScrollLock, Pause
-   * 
-   * Modifier support:
-   * - Shift: Produces uppercase letters and symbol variants
-   * - Ctrl: Produces control codes (A→0x01, B→0x02, ..., Z→0x1A)
-   * - Caps Lock: Acts as shift toggle for letters
-   * - Alt/Meta: Not directly processed (passed through to application)
-   * 
-   * @param forever If true, blocks indefinitely waiting for keyboard input.
-   *                If false, returns immediately with 0 if no key available.
-   * @return ASCII character code, or 0 if no key available (when forever=false)
-   * 
-   * @note Implementation uses internal state tracking:
-   * - Detects key press transitions (not-pressed → pressed)
-   * - Handles key repeat with 500ms initial delay, 120ms repeat rate
-   * - Tracks Caps Lock toggling state
-   * 
-   * @see get_ascii_char() for non-blocking variant
-   */
-  char        wait_for_ascii_char(bool forever = true);
-  inline char get_ascii_char() { return wait_for_ascii_char(false); }
+  // Report sink. BTKeyboard is a pure producer: every HID report it
+  // receives is handed to this callback instead of being queued/parsed
+  // here. The input hub (main/input.cpp) registers input_post_bt as the
+  // sink and owns the queue + ASCII translation. See main/input.hpp.
+  typedef void ReportSink(const KeyInfo &inf);
+  inline void set_report_sink(ReportSink *sink) { report_sink_ = sink; }
+
   void        show_bonded_devices();
   void        remove_all_bonded_devices();
 
@@ -219,20 +175,14 @@ private:
   size_t num_bt_scan_results_;
   size_t num_ble_scan_results_;
 
-  QueueHandle_t event_queue_;
   int8_t        battery_level_;
-  bool          key_avail_[MAX_KEY_DATA_SIZE];
-  char          last_ch_;
-  TickType_t    repeat_period_;
-  bool          caps_lock_;
 
   static const char *gap_bt_prop_type_names_[];
   static const char *ble_gap_evt_names_[];
   static const char *bt_gap_evt_names_[];
   static const char *ble_addr_type_names_[];
 
-  static const char shift_trans_dict_[];
-
+  static ReportSink            *report_sink_;
   static BTKeyboard            *bt_keyboard_;
   static PairingHandler        *pairing_handler_;
   static GotConnectionHandler  *got_connection_handler_;

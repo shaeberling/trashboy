@@ -111,50 +111,7 @@ const char *BTKeyboard::ble_addr_type_names_[] = {"PUBLIC", "RANDOM", "RPA_PUBLI
 //  48-56:   ], \, Int#, ;, ', `, ,, ., /
 //  57-82:   CapsLock, F1-F12, PrintScreen, ScrollLock, Pause, Insert, Home, PageUp, Delete, End, PageDown, Right, Left, Down, Up
 //
-const char BTKeyboard::shift_trans_dict_[] =
-    // Keycodes 4-29: a-z (pairs: normal, shifted)
-    "aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ"
-    // Keycodes 30-39: 1-0 and shifted symbols (pairs: number, symbol)
-    "1!2@3#4$5%6^7&8*9(0)"
-    // Keycodes 40-47: Enter, Esc, Backspace, Tab, Space, -, =, [
-    "\r\r"                     // 40: Enter (0x0D)
-    "\033\033"                 // 41: Esc (0x1B)
-    "\b\b"                     // 42: Backspace (0x08)
-    "\t\t"                     // 43: Tab (0x09)
-    "  "                       // 44: Space
-    "-_"                       // 45: - and _
-    "=+"                       // 46: = and +
-    "[{"                       // 47: [ and {
-    // Keycodes 48-56: ], \, Int#, ;, ', `, , (comma), ., /
-    "]}"                       // 48: ] and }
-    "\\|"                      // 49: \ and |
-    "??"                       // 50: Int# (non-US #, varies by layout)
-    ";:"                       // 51: ; and :
-    "'\""                      // 52: ' and "
-    "`~"                       // 53: ` and ~
-    ",<"                       // 54: , and <
-    ".>"                       // 55: . and >
-    "/?"                       // 56: / and ?
-    // Keycode 57: CapsLock (special handling, returns 0x80)
-    "\200\200"
-    // Keycodes 58-63: F1-F6 (special key codes)
-    "\201\201\202\202\203\203\204\204\205\205\206\206"
-    // Keycodes 64-69: F7-F12
-    "\207\207\210\210\211\211\212\212\213\213\214\214"
-    // Keycodes 70-72: PrintScreen, ScrollLock, Pause
-    "\215\215\216\216\217\217"
-    // Keycodes 73-82: Insert, Home, PageUp, Delete, End, PageDown, Right, Left, Down, Up
-    "\220\220"                 // 73: Insert (0x80 | 0x10 = 0x90)
-    "\221\221"                 // 74: Home (0x80 | 0x11 = 0x91)
-    "\222\222"                 // 75: PageUp (0x80 | 0x12 = 0x92)
-    "\177\177"                 // 76: Delete (0x7F - standard ASCII DEL)
-    "\223\223"                 // 77: End (0x80 | 0x13 = 0x93)
-    "\224\224"                 // 78: PageDown (0x80 | 0x14 = 0x94)
-    "\225\225"                 // 79: Right Arrow (0x80 | 0x15 = 0x95)
-    "\226\226"                 // 80: Left Arrow (0x80 | 0x16 = 0x96)
-    "\227\227"                 // 81: Down Arrow (0x80 | 0x17 = 0x97)
-    "\230\230";                // 82: Up Arrow (0x80 | 0x18 = 0x98)
-
+BTKeyboard::ReportSink            *BTKeyboard::report_sink_             = nullptr;
 BTKeyboard                        *BTKeyboard::bt_keyboard_             = nullptr;
 BTKeyboard::PairingHandler        *BTKeyboard::pairing_handler_         = nullptr;
 BTKeyboard::GotConnectionHandler  *BTKeyboard::got_connection_handler_  = nullptr;
@@ -382,8 +339,6 @@ bool BTKeyboard::setup(PairingHandler        *pairing_handler,
   got_connection_handler_  = got_connection_handler;
   lost_connection_handler_ = lost_connection_handler;
 
-  event_queue_             = xQueueCreate(10, sizeof(KeyInfo));
-
   if (HID_HOST_MODE == HIDH_IDLE_MODE) {
     ESP_LOGE(TAG, "Please turn on BT HID host or BLE!");
     return false;
@@ -467,11 +422,6 @@ bool BTKeyboard::setup(PairingHandler        *pairing_handler,
       .callback = hidh_callback, .event_stack_size = 4 * 1024, .callback_arg = nullptr};
   ESP_ERROR_CHECK(esp_hidh_init(&config));
 
-  for (int i = 0; i < MAX_KEY_DATA_SIZE; i++) {
-    key_avail_[i] = true;
-  }
-
-  last_ch_       = 0;
   battery_level_ = -1;
   return true;
 }
@@ -1354,158 +1304,15 @@ void BTKeyboard::push_key(uint8_t *keys, uint8_t size) {
     size = MAX_KEY_DATA_SIZE;
   }
 
-  // enqueue
   inf.size = size;
   inf.modifier = static_cast<KeyModifier>(keys[0]);
   memset(inf.keys, 0, sizeof(inf.keys));
   memcpy(inf.keys, keys, size);
 
-  xQueueSendToBack(event_queue_, &inf, 0);
-}
-
-/**
- * @brief Waits for and processes keyboard input to return an ASCII character.
- *
- * This method handles keyboard input processing including:
- * - Key repeat functionality
- * - Modifier keys (Shift, Ctrl)
- * - Caps Lock toggle
- * - Character translation using shift translation dictionary
- *
- * @param forever If true, waits indefinitely for input. If false, returns immediately if no input
- *                is available and last character was 0, otherwise waits for repeat period.
- *
- * @return ASCII character based on the keyboard input and current modifier state.
- *         Returns:
- *         - Control characters (1-26) when Ctrl is pressed with letters
- *         - Shifted or unshifted characters based on Shift and Caps Lock states
- *         - Last character on key repeat
- *         - 0 if no valid character could be generated
- *
- * @note The method manages internal repeat timing and caps lock state.
- */
-/**
- * @brief Wait for and assemble keyboard events into ASCII characters
- * 
- * This function processes USB HID keyboard reports and returns ASCII characters.
- * It handles:
- * - Letter keys with shift and Caps Lock modifiers
- * - Numbers with their shifted symbols (!@#$%^&*())
- * - Special keys (ESC, ENTER, BACKSPACE, DELETE, etc.)
- * - Function keys (F1-F12)
- * - Arrow keys
- * 
- * @param forever If true, wait indefinitely for a key event. If false, return immediately.
- * @return The assembled ASCII character, or 0 if no key available (when forever=false)
- * 
- * Algorithm:
- * 1. Call wait_for_low_event() to get keyboard reports (modifier + up to 6 key codes)
- * 2. Track which keys are newly pressed (compare against previous state)
- * 3. Map HID keycode to ASCII using shift_trans_dict_:
- *    - For keycodes 4-0x52: index = (keycode - 4) * 2 + [0=normal, 1=shifted]
- *    - Apply Shift modifier: selects normal (0) or shifted (1) character
- *    - Apply Caps Lock: reverses the shift selection for letters only
- * 4. Handle Ctrl modifier: converts letters to control codes (0x01-0x1A)
- * 5. Return the character and set up repeat delay for key auto-repeat
- * 
- * Special keys return:
- * - ESC (0x1B), ENTER (0x0D), BACKSPACE (0x08), DELETE (0x7F)
- * - Function keys and special keys use extended codes (0x80-0x9F range)
- * 
- * Example key sequences:
- * (Keycode meanings from USB HID:  4=A, 5=B, etc.)
- * 
- * Pressing Shift+A:
- *  Event 1: modifier=0x02 (Left Shift), keycode=0 (shift down)
- *  Event 2: modifier=0x02, keycode=4 (A pressed while shift held)
- *  Event 3: modifier=0x02, keycode=0 (A released)
- *  Event 4: modifier=0x00, keycode=0 (shift released)
- *  Returns: 'A'
- */
-char BTKeyboard::wait_for_ascii_char(bool forever) {
-  KeyInfo inf;
-
-  while (true) {
-    // Wait for next keyboard event, using repeat delay if we just returned a key
-    if (!wait_for_low_event(inf,
-                            (last_ch_ == 0) ? (forever ? portMAX_DELAY : 0) : repeat_period_)) {
-      repeat_period_ = pdMS_TO_TICKS(300);  // Set repeat delay for next repeat (300ms = ~3 chars/sec)
-      return last_ch_;
-    }
-
-    // Find the first newly-pressed key (transition from not-present to present)
-    int k = -1;
-    for (int i = 0; i < MAX_KEY_DATA_SIZE; i++) {
-      if ((k < 0) && key_avail_[i] && (inf.keys[i] != 0)) {  // Was empty AND now has a key
-        k = i;
-      }
-      key_avail_[i] = inf.keys[i] == 0;  // Track this key for next iteration
-    }
-
-    // No new key pressed
-    if (k < 0) {
-      // Check if all keys are released
-      bool all_keys_released = true;
-      for (int i = 0; i < MAX_KEY_DATA_SIZE; i++) {
-        if (inf.keys[i] != 0) {
-          all_keys_released = false;
-          break;
-        }
-      }
-      
-      if (all_keys_released) {
-        last_ch_ = 0;  // Reset last character when all keys are released
-      }
-      
-      continue;
-    }
-
-    char ch = inf.keys[k];  // Get the HID keycode
-
-    if (ch >= 4) {
-      // Handle Ctrl modifier: Ctrl+A-Z produces 0x01-0x1A
-      if (static_cast<uint8_t>(inf.modifier) & CTRL_MASK) {
-        if (ch < (3 + 26)) {  // Control codes only for A-Z
-          repeat_period_ = pdMS_TO_TICKS(500);
-          return last_ch_ = (ch - 3);  // Convert keycode to control code
-        }
-      } else if (ch <= 0x52) {  // Regular keys (keycodes 4-82)
-        // Check for Caps Lock toggle (keycode 0x39)
-        if (ch == KEY_CAPS_LOCK) {
-          caps_lock_ = !caps_lock_;
-        }
-        
-        // Map keycode to ASCII using shift_trans_dict_
-        // Format: shift_trans_dict_[(keycode - 4) * 2 + offset]
-        // where offset = 0 for normal, 1 for shifted
-        
-        if (static_cast<uint8_t>(inf.modifier) & SHIFT_MASK) {
-          // Shift is pressed
-          if (caps_lock_) {
-            // Shift + Caps Lock: use normal character (shift toggles off)
-            repeat_period_ = pdMS_TO_TICKS(500);
-            return last_ch_ = shift_trans_dict_[(ch - 4) << 1];
-          } else {
-            // Shift without Caps Lock: use shifted character
-            repeat_period_ = pdMS_TO_TICKS(500);
-            return last_ch_ = shift_trans_dict_[((ch - 4) << 1) + 1];
-          }
-        } else {
-          // No Shift pressed
-          if (caps_lock_) {
-            // Caps Lock without Shift: use shifted character
-            repeat_period_ = pdMS_TO_TICKS(500);
-            return last_ch_ = shift_trans_dict_[((ch - 4) << 1) + 1];
-          } else {
-            // No modifiers: use normal character
-            repeat_period_ = pdMS_TO_TICKS(500);
-            return last_ch_ = shift_trans_dict_[(ch - 4) << 1];
-          }
-        }
-      }
-    }
-
-    last_ch_ = 0;
+  // Hand off to the registered sink (the input hub). BTKeyboard no longer
+  // owns a queue or does ASCII translation.
+  if (report_sink_ != nullptr) {
+    report_sink_(inf);
   }
 }
 

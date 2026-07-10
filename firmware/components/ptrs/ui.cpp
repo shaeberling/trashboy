@@ -5,6 +5,7 @@
 #include "trs_screen.h"
 #include <freertos/task.h>
 #include "bt_keyboard.hpp"
+#include "input.hpp"
 
 extern "C" {
   #include <trs-lib.h>
@@ -41,7 +42,7 @@ static void screen_update(uint8_t* from, uint8_t* to)
 
 static char get_next_key()
 {
-  uint8_t ch = bt_keyboard.wait_for_ascii_char(true);
+  uint8_t ch = input_wait_ascii(true);  // input hub: BT keyboard + board buttons
 
   switch(ch) {
   case 0x1b:

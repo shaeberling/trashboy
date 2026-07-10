@@ -30,12 +30,18 @@ esp_err_t mcp23017_read_b(uint8_t *out);
 // stores are 8-bit aligned so reads/writes are atomic on this MCU.
 void mcp23017_get_ports(uint8_t *port_a, uint8_t *port_b);
 
-// Spawn the button task driven by the MCP23017's INTA pin. Configures
-// the chip for interrupt-on-change across port A and the given ESP32
-// GPIO for a falling-edge interrupt with internal pull-up. The task
-// wakes on each edge, reads GPIOA (which clears the chip-side INT),
-// and logs press/release for GPA0/GPA1.
-bool mcp23017_start_button_task(int int_gpio);
+// Called from the poll task whenever the port state changes, with the
+// fresh port A/B snapshots (pressed = bit 0). Runs in the poll task's
+// context. May be NULL.
+typedef void (*mcp23017_change_cb_t)(uint8_t port_a, uint8_t port_b);
+
+// Spawn the button poll task. It reads ports A and B over I2C on a fixed
+// cadence, caches the result for mcp23017_get_ports(), logs press/release
+// edges, and (if on_change != NULL) invokes it on every change. Polling
+// (rather than the chip's INTA/INTB pins) is deliberate: this board has
+// no free, exposed, non-strapping GPIO to receive an interrupt. Returns
+// true on successful task creation.
+bool mcp23017_start_button_task(mcp23017_change_cb_t on_change);
 
 #ifdef __cplusplus
 }

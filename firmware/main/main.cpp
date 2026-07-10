@@ -6,6 +6,7 @@
 #include "esp_heap_caps.h"
 #include "nvs_flash.h"
 #include "bt_keyboard.hpp"
+#include "input.hpp"
 #include "trs-keyboard.h"
 #include "ui.h"
 #include <iostream>
@@ -114,7 +115,7 @@ static void wait_for_hid_press(uint8_t hid_code) {
            hid_code, bt_keyboard.is_connected());
   BTKeyboard::KeyInfo inf;
   while (true) {
-    if (!bt_keyboard.wait_for_low_event(inf, pdMS_TO_TICKS(2000))) {
+    if (!input_wait_event(inf, pdMS_TO_TICKS(2000))) {
       continue;
     }
     for (int i = 1; i < inf.size && i < BTKeyboard::MAX_KEY_DATA_SIZE; i++) {
@@ -128,7 +129,7 @@ static void wait_for_hid_press(uint8_t hid_code) {
 static uint8_t wait_for_any_hid_press(const uint8_t *codes, int n) {
   BTKeyboard::KeyInfo inf;
   while (true) {
-    if (!bt_keyboard.wait_for_low_event(inf, pdMS_TO_TICKS(2000))) continue;
+    if (!input_wait_event(inf, pdMS_TO_TICKS(2000))) continue;
     for (int i = 1; i < inf.size && i < BTKeyboard::MAX_KEY_DATA_SIZE; i++) {
       uint8_t k = inf.keys[i];
       if (k == 0) continue;
@@ -145,12 +146,12 @@ static uint8_t wait_for_any_hid_press(const uint8_t *codes, int n) {
 static void drain_bt_events(int settle_ms = 150) {
   vTaskDelay(pdMS_TO_TICKS(settle_ms));
   BTKeyboard::KeyInfo inf;
-  while (bt_keyboard.wait_for_low_event(inf, 0)) {}
+  while (input_wait_event(inf, 0)) {}
 }
 
 // ---- Wi-Fi setup flow (runs on keyb_task while the splash is still up) ----
 
-// ASCII codes produced by BTKeyboard::wait_for_ascii_char for special keys.
+// ASCII codes produced by input_wait_ascii for special keys.
 static constexpr char K_ENTER     = 0x0D;
 static constexpr char K_ESC       = 0x1B;
 static constexpr char K_BACKSPACE = 0x08;
@@ -169,7 +170,7 @@ static int run_wifi_picker(const wifi_mgr_ap_t *aps, int n) {
   splash_show_list(items, n, sel);
 
   while (true) {
-    char ch = bt_keyboard.wait_for_ascii_char(true);
+    char ch = input_wait_ascii(true);
     if (ch == K_DOWN) {
       if (sel < n - 1) { sel++; splash_set_list_selection(sel); }
     } else if (ch == K_UP) {
@@ -195,7 +196,7 @@ static bool run_password_input(const char *ssid, char *out, size_t out_len) {
   splash_set_subtext(" ");  // start with a space so the line takes up vertical room
 
   while (true) {
-    char ch = bt_keyboard.wait_for_ascii_char(true);
+    char ch = input_wait_ascii(true);
     if (ch == K_ENTER) {
       if (out_len > 0) {
         strncpy(out, buf, out_len - 1);
@@ -529,7 +530,7 @@ static void run_retrostore_browse() {
   splash_show_list(items, n, sel);
 
   while (true) {
-    char ch = bt_keyboard.wait_for_ascii_char(true);
+    char ch = input_wait_ascii(true);
     if (ch == K_DOWN) {
       if (sel < n - 1) { sel++; splash_set_list_selection(sel); }
     } else if (ch == K_UP) {
@@ -614,7 +615,7 @@ void keyb_task(void* arg) {
     // to dismiss the splash and let the TRS-80 boot.
     while (true) {
       BTKeyboard::KeyInfo inf;
-      if (!bt_keyboard.wait_for_low_event(inf, pdMS_TO_TICKS(100))) continue;
+      if (!input_wait_event(inf, pdMS_TO_TICKS(100))) continue;
       if (key_report_contains(inf, 0x28) || key_report_contains(inf, 0x58)) break;
     }
 #else
@@ -643,7 +644,7 @@ void keyb_task(void* arg) {
       vTaskDelay(pdMS_TO_TICKS(5));
       BTKeyboard::KeyInfo inf;
 
-      bt_keyboard.wait_for_low_event(inf);
+      input_wait_event(inf);
       if ((inf.size == 4 && inf.keys[2] == 2    /* F5 */) ||
           (inf.size == 8 && inf.keys[2] == 0x3e /* F5 on Rii */)) {
         z80_pause();
@@ -792,6 +793,11 @@ static void heap_diag_task(void *arg) {
 
 extern "C" void app_main(void)
 {
+  // Bring up the input hub before any producer can post. BT reports are
+  // routed here via the sink; physical buttons via the MCP poll callback.
+  input_init();
+  bt_keyboard.set_report_sink(input_post_bt);
+
   // Initialize I2C (required by EXIO)
   I2C_Init();
 
@@ -799,7 +805,10 @@ extern "C" void app_main(void)
   // Non-fatal: missing chip just means buttons won't work.
   if (mcp23017_probe() == ESP_OK) {
     mcp23017_init();
-    mcp23017_start_button_task(GPIO_NUM_4);  // INTA → GPIO4
+    // Polled over I2C (no INT GPIO; GPIO4 = audio). Presses feed the input
+    // hub, so board buttons drive the menus and the emulator like the BT
+    // keyboard does.
+    mcp23017_start_button_task(input_on_buttons);
   }
 
   // Initialize EXIO (required by LCD)
