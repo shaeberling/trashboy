@@ -15,9 +15,11 @@ static const char *TAG = "mcp23017";
 #define REG_GPIOA  0x12  // read port-A pin state
 #define REG_GPIOB  0x13
 
-// Poll cadence. Also acts as the debounce window: a contact bounce that
-// settles within one interval never shows up as more than one edge.
-#define POLL_INTERVAL_MS 20
+// Poll cadence. 10 ms is ~2x per TRS-80 frame, so the emulator's keyboard
+// scans always see fresh button state. Also acts as the debounce window: a
+// contact bounce that settles within one interval never shows up as more
+// than one edge.
+#define POLL_INTERVAL_MS 10
 
 // Latest snapshot of port A / B pin state, cached by the poll task after
 // each successful read. Consumers (e.g. input-test UI) can read this
@@ -61,12 +63,16 @@ esp_err_t mcp23017_init(void) {
   return ESP_OK;
 }
 
-esp_err_t mcp23017_read_a(uint8_t *out) {
-  return I2C_Read(MCP23017_I2C_ADDR, REG_GPIOA, out, 1);
-}
-
-esp_err_t mcp23017_read_b(uint8_t *out) {
-  return I2C_Read(MCP23017_I2C_ADDR, REG_GPIOB, out, 1);
+esp_err_t mcp23017_read_ab(uint8_t *port_a, uint8_t *port_b) {
+  // GPIOA (0x12) and GPIOB (0x13) are adjacent, and IOCON.SEQOP is left at
+  // its power-on default of 0 (we never write IOCON), so the address pointer
+  // auto-increments: one 2-byte read returns both ports in a single I2C
+  // transaction instead of two.
+  uint8_t buf[2] = { 0xFF, 0xFF };
+  esp_err_t err = I2C_Read(MCP23017_I2C_ADDR, REG_GPIOA, buf, 2);
+  if (port_a) *port_a = buf[0];
+  if (port_b) *port_b = buf[1];
+  return err;
 }
 
 void mcp23017_get_ports(uint8_t *port_a, uint8_t *port_b) {
@@ -84,19 +90,16 @@ static void button_poll_task(void *arg) {
   (void) arg;
   uint8_t prev_a = 0xFF, prev_b = 0xFF;
   // Establish baseline before reporting edges.
-  mcp23017_read_a(&prev_a);
-  mcp23017_read_b(&prev_b);
+  mcp23017_read_ab(&prev_a, &prev_b);
   s_last_a = prev_a;
   s_last_b = prev_b;
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
 
     uint8_t cur_a = 0xFF, cur_b = 0xFF;
-    esp_err_t err_a = mcp23017_read_a(&cur_a);
-    esp_err_t err_b = mcp23017_read_b(&cur_b);
-    if (err_a != ESP_OK || err_b != ESP_OK) {
-      ESP_LOGW(TAG, "read GPIOA/B failed: %s / %s",
-               esp_err_to_name(err_a), esp_err_to_name(err_b));
+    esp_err_t err = mcp23017_read_ab(&cur_a, &cur_b);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "read GPIOA/B failed: %s", esp_err_to_name(err));
       continue;
     }
 

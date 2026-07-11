@@ -19,11 +19,10 @@ esp_err_t mcp23017_probe(void);
 // Buttons on GPA0/GPA1 read LOW when pressed.
 esp_err_t mcp23017_init(void);
 
-// Read the GPIOA port (8 bits). Caller-side: pressed = bit == 0.
-esp_err_t mcp23017_read_a(uint8_t *out);
-
-// Read the GPIOB port (8 bits). Caller-side: pressed = bit == 0.
-esp_err_t mcp23017_read_b(uint8_t *out);
+// Read both ports (GPIOA -> *port_a, GPIOB -> *port_b) in a single I2C
+// transaction via the chip's address auto-increment. Caller-side: a pin
+// reads LOW (bit == 0) when its button is pressed.
+esp_err_t mcp23017_read_ab(uint8_t *port_a, uint8_t *port_b);
 
 // Return the most recent port A/B snapshot cached by the button task.
 // Both pointers may be NULL. Safe to call from any task; the underlying
