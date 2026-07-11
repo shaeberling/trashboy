@@ -22,9 +22,12 @@
 
 // On the original (no-touch) hardware module SDM audio was wired to GPIO 16.
 // On the Waveshare ESP32-S3-Touch-LCD-2.8B that pin is the GT911 touch
-// interrupt — see Touch_Driver/Touch.h — so SDM was moved to GPIO 4, the
-// only ESP32-S3 GPIO on this board with no strapping role, no peripheral
-// assignment, and no allocation to the LCD / SD / I2C / USB / UART.
+// interrupt — see Touch_Driver/Touch.h — so it was moved to GPIO 4.
+//
+// (GPIO 4 also carries the board's battery-voltage sense divider. We briefly
+// suspected that of loading the audio and tested SDM on GPIO 44, but the real
+// cause of the quiet audio was wrong filter caps — uF instead of nF — so
+// GPIO 4 is fine and stays the audio pin.)
 #define SDM_AUDIO_PIN GPIO_NUM_4
 
 typedef uint8_t Uchar;

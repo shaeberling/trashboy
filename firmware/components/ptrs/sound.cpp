@@ -2,7 +2,18 @@
 #include "sound.h"
 #include <driver/gptimer.h>
 #include <driver/sdm.h>
+#include <math.h>
 #include <stdint.h>
+#include "esp_log.h"
+#include "sdkconfig.h"
+
+static const char *SND_TAG = "sound";
+
+// Diagnostics gated by CONFIG_TRASHBOY_SOUND_DIAG (Trashboy menuconfig
+// submenu): when enabled, log SDM activity every second and play a
+// continuous test tone so the SDM->speaker chain can be verified
+// independent of the emulator. Off = normal operation (no tone, no spam).
+#define SOUND_DIAG CONFIG_TRASHBOY_SOUND_DIAG
 
 #define SDM_OVERSAMPLE_RATE_HZ (10000000)
 // Keep this on a divider-friendly value for APB timers.
@@ -109,6 +120,15 @@ static sdm_channel_handle_t s_sdm_channel = NULL;
 static gptimer_handle_t s_sdm_timer = NULL;
 static bool s_sdm_channel_enabled = false;
 
+#if SOUND_DIAG
+// Bumped from the timer ISR. s_dbg_cb = every fire (proves the 22 kHz timer
+// is alive); s_dbg_nonzero = fires where a non-zero density was actually
+// written to the pin (proves a varying signal is being driven).
+static volatile uint32_t s_dbg_cb = 0;
+static volatile uint32_t s_dbg_nonzero = 0;
+static volatile int8_t   s_dbg_last_density = 0;
+#endif
+
 void sdm_set_motor_state(bool motor_on) {
   // Sound output is active when cassette motor is OFF.
   s_sdm_tx_enabled = !motor_on;
@@ -140,8 +160,11 @@ uint8_t getSample() {
   return 0;
 }
 
-// SDM density is clamped to 20% of full scale (±25 out of ±127) to protect
-// the AST-01508MR-R speaker from over-excursion.
+// SDM density clamp (out of ±127) to protect the AST-01508MR-R speaker from
+// over-excursion. Back to the original 25 (~20% modulation): the "barely
+// audible" symptom that made us raise it turned out to be wrong filter caps
+// (uF instead of nF shorting the audio to ground), not a too-low clamp. With
+// the filter fixed, 25 is the safe level; tune up cautiously if you want more.
 static const int SDM_AMPLITUDE_LIMIT = 25;
 
 static int8_t buildSdmDensitySample()
@@ -161,6 +184,9 @@ static bool IRAM_ATTR sdmTimerCallback(gptimer_handle_t timer,
                                       const gptimer_alarm_event_data_t *edata,
                                       void *user_ctx)
 {
+#if SOUND_DIAG
+  s_dbg_cb++;  // counts every fire, including gated ones below
+#endif
   if (!s_sdm_tx_enabled || !s_sdm_channel_enabled || s_sdm_channel == NULL || trsSamplesGenerator == NULL) {
     return false;
   }
@@ -168,6 +194,10 @@ static bool IRAM_ATTR sdmTimerCallback(gptimer_handle_t timer,
   // No hard mute - always output the sample
   int8_t density = buildSdmDensitySample();
   sdm_channel_set_pulse_density(s_sdm_channel, density);
+#if SOUND_DIAG
+  if (density != 0) s_dbg_nonzero++;
+  s_dbg_last_density = density;
+#endif
   return false;
 }
 
@@ -208,6 +238,53 @@ static void initSdmTimer()
   ESP_ERROR_CHECK(gptimer_start(s_sdm_timer));
 }
 
+#if SOUND_DIAG
+// Once per second: is the timer alive (cb/s ~= sample rate)? is a non-zero
+// density actually being written (nonzero/s > 0 => a signal is on the pin)?
+// is a source feeding the ring (fill > 0)? and are the gates open?
+static void sound_diag_task(void *arg)
+{
+  (void) arg;
+  uint32_t last_cb = 0, last_nz = 0;
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    uint32_t cb = s_dbg_cb, nz = s_dbg_nonzero;
+    ESP_LOGI(SND_TAG,
+             "SDM gpio=%d cb=%u/s nonzero=%u/s last_density=%d ring_fill=%u "
+             "enabled=%d tx=%d",
+             (int) SDM_AUDIO_PIN,
+             (unsigned) (cb - last_cb), (unsigned) (nz - last_nz),
+             (int) s_dbg_last_density, (unsigned) sdm_get_ring_fill(),
+             (int) s_sdm_channel_enabled, (int) s_sdm_tx_enabled);
+    last_cb = cb;
+    last_nz = nz;
+  }
+}
+
+// CONTINUOUS 440 Hz tone at full (clamped) amplitude, forever. Keeps the ring
+// topped up so the whole SDM -> pin -> amp -> speaker chain is exercised
+// independent of the emulator and independent of when you start capturing:
+//   - if you HEAR it and the log shows nonzero/s > 0  -> chain works
+//   - if it's SILENT but the log shows nonzero/s > 0   -> hardware (pin/amp/speaker)
+//   - if the log still shows nonzero/s == 0            -> software (ring/consumer)
+// Amplitude 40 saturates past the +/-25 SDM clamp for maximum volume.
+static void sound_selftest_task(void *arg)
+{
+  (void) arg;
+  const int rate = sdm_get_effective_sample_rate();
+  const float w = 2.0f * (float) M_PI * 440.0f / (float) rate;
+  uint32_t n = 0;
+  for (;;) {
+    if (trsSamplesGenerator->putSample(
+            (Uint8) (SIGNAL_CENTER + (int) (sinf(w * n) * 90.0f)))) {
+      n++;
+    } else {
+      vTaskDelay(1);  // ring full; let the 22 kHz consumer drain it
+    }
+  }
+}
+#endif
+
 void init_sound()
 {
   sdm_config_t sdm_config = {
@@ -223,4 +300,15 @@ void init_sound()
 
   sdm_set_motor_state(false);
   initSdmTimer();
+
+#if SOUND_DIAG
+  ESP_LOGI(SND_TAG,
+           "init: gpio=%d oversample=%dHz target_rate=%dHz effective_rate=%dHz "
+           "enabled=%d tx=%d",
+           (int) SDM_AUDIO_PIN, SDM_OVERSAMPLE_RATE_HZ, SDM_SAMPLING_FREQ,
+           sdm_get_effective_sample_rate(),
+           (int) s_sdm_channel_enabled, (int) s_sdm_tx_enabled);
+  xTaskCreatePinnedToCore(sound_diag_task, "snd_diag", 3072, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(sound_selftest_task, "snd_test", 3072, NULL, 3, NULL, 0);
+#endif
 }

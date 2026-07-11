@@ -50,4 +50,18 @@ config TRASHBOY_INPUT_TEST_MODE
       TP_RST via TCA9554 EXIO2) plus an external MCP23017 button
       expander at 0x21.
 
+config TRASHBOY_SOUND_DIAG
+    bool "Enable SDM audio diagnostics (test tone + telemetry)"
+    default n
+    help
+      When enabled, the sound subsystem logs SDM activity once per second
+      (timer callback rate, count of non-zero density writes, ring fill,
+      and the enable/tx gate states) and plays a continuous 440 Hz test
+      tone. This lets you verify the SDM -> RC filter -> PAM8302 ->
+      speaker chain independently of the emulator when bringing up or
+      debugging audio hardware.
+
+      Leave disabled for normal use: the test tone would otherwise play
+      over (and starve) real game audio, plus the per-second log is noise.
+
 endmenu
