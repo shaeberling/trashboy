@@ -261,6 +261,8 @@ TRSScreen::TRSScreen()
 {
   top = nullptr;
   trsCanvas = nullptr;
+  canvas = nullptr;
+  canvas_buf = nullptr;
   prevScreenBuffer = (uint8_t*) malloc(MAX_TRS_SCREEN_WIDTH * MAX_TRS_SCREEN_HEIGHT);
   memset(prevScreenBuffer, 0xFF, MAX_TRS_SCREEN_WIDTH * MAX_TRS_SCREEN_HEIGHT);
   mutex = xSemaphoreCreateRecursiveMutex();
@@ -285,6 +287,20 @@ void TRSScreen::init()
   lv_obj_clear_flag(canvas, LV_OBJ_FLAG_SCROLLABLE);
   createCanvas();
 #endif
+  xSemaphoreGiveRecursive(mutex);
+}
+
+void TRSScreen::setVisible(bool visible)
+{
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
+  if (canvas != nullptr) {
+    if (visible) {
+      lv_obj_clear_flag(canvas, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_invalidate(canvas);
+    } else {
+      lv_obj_add_flag(canvas, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
   xSemaphoreGiveRecursive(mutex);
 }
 

@@ -43,3 +43,11 @@ bool input_wait_event(BTKeyboard::KeyInfo &inf, TickType_t timeout = portMAX_DEL
 // Consumer: merged stream translated to ASCII, with key-repeat and
 // caps-lock handling (for the menus / Wi-Fi text entry).
 char input_wait_ascii(bool forever = true);
+
+// Drop all queued events AND reset the ASCII translator's key-repeat /
+// press-tracking state. Use this when switching input consumers (e.g.
+// leaving a sub-screen): emptying only the queue would eat the release
+// report of the key that triggered the switch, leaving the translator's
+// repeat state armed — it would then synthesize a phantom repeat of that
+// key for the next consumer.
+void input_flush(void);

@@ -53,6 +53,7 @@ static const BtnMap BTN_MAP[] = {
   { PORT_A,  6, 0x2C, 14 },  // A6 -> Space
   { PORT_B,  6, 0x29, 15 },  // B6 -> Esc
   { PORT_B,  7, 0x1E, 16 },  // B7 -> "1"
+  { PORT_A,  7, 0x4B, 17 },  // A7 -> menu/home (HID PageUp; see main.cpp)
 };
 
 static QueueHandle_t     s_queue = NULL;
@@ -148,6 +149,19 @@ extern "C" void input_on_buttons(uint8_t port_a, uint8_t port_b) {
 bool input_wait_event(KeyInfo &inf, TickType_t timeout) {
   if (s_queue == NULL) return false;
   return xQueueReceive(s_queue, &inf, timeout);
+}
+
+void input_flush(void) {
+  if (s_queue != NULL) {
+    KeyInfo inf;
+    while (xQueueReceive(s_queue, &inf, 0)) {}
+  }
+  // Reset the ASCII translator so a key consumed before the flush can't
+  // fire a phantom repeat at the next consumer (its release report may
+  // just have been discarded above).
+  s_last_ch = 0;
+  s_repeat_period = 0;
+  for (int i = 0; i < MAXK; i++) s_key_avail[i] = true;
 }
 
 // Assemble ASCII characters from the merged HID stream. Verbatim port of

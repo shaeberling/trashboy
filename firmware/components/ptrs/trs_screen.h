@@ -191,6 +191,10 @@ private:
 public:
   TRSScreen();
   void init();
+  // Show/hide the emulator's full-screen LVGL canvas. Used by the main-menu
+  // flow: the menu (rotated LVGL UI) and the emulator never coexist, so
+  // returning to the menu just hides the canvas instead of tearing it down.
+  void setVisible(bool visible);
   void createCanvas();
   void push(ScreenBuffer* screenBuffer);
   void pop();

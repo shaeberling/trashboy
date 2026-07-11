@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdarg.h>
 #include <assert.h>
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
@@ -86,8 +87,32 @@ void keyboard_connected_handler() {
 }
 
 static volatile bool do_z80_reset = false;
-static volatile bool splash_dismiss_requested = false;
-static volatile bool splash_dismissed = false;
+
+// ---- UI mode machinery -----------------------------------------------------
+//
+// The LVGL menu UI (rotated 270, splash widgets) and the TRS-80 emulator
+// (rotation 0, full-screen canvas) never coexist: the board's A7 "menu"
+// button kills the running game and returns to the menu. All LVGL work —
+// including the mode transition itself — happens on display_task; other
+// tasks request a mode and block until it has been applied.
+
+enum ui_mode_t { UI_MODE_MENU, UI_MODE_GAME };
+static volatile ui_mode_t g_ui_mode_req = UI_MODE_MENU;
+static volatile ui_mode_t g_ui_mode_cur = UI_MODE_MENU;  // written by display_task
+static SemaphoreHandle_t  g_ui_mode_done = NULL;
+static bool g_trs_screen_inited = false;   // display_task-only
+static volatile bool g_z80_ready = false;  // z80_task subsystem inits done
+
+// Request a UI mode and block until display_task has applied it.
+static void ui_set_mode(ui_mode_t m) {
+  if (g_ui_mode_cur == m) return;
+  g_ui_mode_req = m;
+  xSemaphoreTake(g_ui_mode_done, portMAX_DELAY);
+}
+
+static void wait_z80_ready() {
+  while (!g_z80_ready) vTaskDelay(pdMS_TO_TICKS(50));
+}
 
 // If non-null when z80_task starts the emulator, it loads this CMD blob
 // over the freshly-reset Z80 memory and jumps to the parsed entry point.
@@ -107,6 +132,7 @@ static bool key_report_contains(const BTKeyboard::KeyInfo &inf, uint8_t hid_code
 // HID usage codes we recognise directly from raw reports.
 static constexpr uint8_t HID_ENTER = 0x28;
 static constexpr uint8_t HID_ESC   = 0x29;
+static constexpr uint8_t HID_MENU_BTN = 0x4B;  // board button A7 (HID PageUp)
 
 // Block until a HID report contains the given usage-code as a press.
 static void wait_for_hid_press(uint8_t hid_code) {
@@ -139,16 +165,19 @@ static uint8_t wait_for_any_hid_press(const uint8_t *codes, int n) {
   }
 }
 
-// Drop any events currently in the BT keyboard queue. Used after we leave
-// a sub-screen on a key press, so the matching release event (or a held
-// repeat) doesn't trigger an action on the screen we just returned to.
+// Drop any pending input events. Used after we leave a sub-screen on a key
+// press, so the matching release event (or a held repeat) doesn't trigger an
+// action on the screen we just returned to. input_flush() also resets the
+// ASCII translator's key-repeat state — emptying only the queue would eat
+// the release report and leave the repeat armed, which made the next menu
+// receive a phantom ENTER (e.g. Settings self-selecting "Wi-Fi Setup" right
+// after leaving the TRS-80 config screen).
 static void drain_bt_events(int settle_ms = 150) {
   vTaskDelay(pdMS_TO_TICKS(settle_ms));
-  BTKeyboard::KeyInfo inf;
-  while (input_wait_event(inf, 0)) {}
+  input_flush();
 }
 
-// ---- Wi-Fi setup flow (runs on keyb_task while the splash is still up) ----
+// ---- Wi-Fi setup flow (runs on flow_task, drawing into the splash UI) ----
 
 // ASCII codes produced by input_wait_ascii for special keys.
 static constexpr char K_ENTER     = 0x0D;
@@ -158,6 +187,7 @@ static constexpr char K_RIGHT     = (char)0x95;
 static constexpr char K_LEFT      = (char)0x96;
 static constexpr char K_DOWN      = (char)0x97;
 static constexpr char K_UP        = (char)0x98;
+static constexpr char K_MENU      = (char)0x92;  // A7 menu button (HID PageUp)
 
 // Returns the chosen index in [0, n), or -1 if the user pressed ESC.
 static int run_wifi_picker(const wifi_mgr_ap_t *aps, int n) {
@@ -176,7 +206,7 @@ static int run_wifi_picker(const wifi_mgr_ap_t *aps, int n) {
       if (sel > 0)     { sel--; splash_set_list_selection(sel); }
     } else if (ch == K_ENTER) {
       return sel;
-    } else if (ch == K_ESC) {
+    } else if (ch == K_ESC || ch == K_MENU) {
       return -1;
     }
   }
@@ -203,7 +233,7 @@ static bool run_password_input(const char *ssid, char *out, size_t out_len) {
       }
       splash_set_subtext("");
       return true;
-    } else if (ch == K_ESC) {
+    } else if (ch == K_ESC || ch == K_MENU) {
       splash_set_subtext("");
       return false;
     } else if (ch == K_BACKSPACE) {
@@ -242,44 +272,10 @@ static bool try_connect(const char *ssid, const char *password) {
   return ok;
 }
 
-// Drives the splash through Wi-Fi setup until we're connected.
-static void run_wifi_setup() {
-  splash_set_compact();   // shrink logo to free up vertical room for the list
-  splash_set_status("Initializing Wi-Fi...");
-  wifi_mgr_init();
-
-#if CONFIG_TRASHBOY_WIFI_USE_PRESET
-  // Developer toggle (CONFIG_TRASHBOY_WIFI_USE_PRESET=y): connect to the
-  // SSID/password baked into the firmware. Falls through to the normal
-  // stored-creds / picker flow on failure so testing still has a recovery
-  // path if the preset is wrong.
-  {
-    const char *preset_ssid = CONFIG_TRASHBOY_WIFI_PRESET_SSID;
-    const char *preset_pass = CONFIG_TRASHBOY_WIFI_PRESET_PASSWORD;
-    if (preset_ssid[0] != '\0') {
-      ESP_LOGI(TAG, "Using preset Wi-Fi credentials for '%s'", preset_ssid);
-      if (try_connect(preset_ssid, preset_pass)) return;
-      splash_set_status("Preset Wi-Fi failed, falling back to picker...");
-      vTaskDelay(pdMS_TO_TICKS(1500));
-    } else {
-      ESP_LOGW(TAG, "CONFIG_TRASHBOY_WIFI_USE_PRESET=y but SSID is empty");
-    }
-  }
-#endif
-
-  // 1) Try stored credentials first.
-  {
-    char ssid[WIFI_MGR_SSID_LEN];
-    char password[WIFI_MGR_PASS_LEN];
-    if (wifi_mgr_load_creds(ssid, sizeof(ssid), password, sizeof(password))) {
-      ESP_LOGI(TAG, "Trying stored credentials for '%s'", ssid);
-      if (try_connect(ssid, password)) return;
-      splash_set_status("Stored credentials failed, rescanning...");
-      vTaskDelay(pdMS_TO_TICKS(1500));
-    }
-  }
-
-  // 2) Manual scan / pick / password loop.
+// Interactive scan / pick / password flow, entered from Settings. The
+// automatic preset/stored-creds connect lives in wifi_bg_task instead —
+// the menu never blocks on Wi-Fi.
+static void run_wifi_interactive_setup() {
   while (true) {
     splash_set_status("Scanning Wi-Fi networks...");
     wifi_mgr_ap_t aps[WIFI_MGR_MAX_APS];
@@ -293,7 +289,7 @@ static void run_wifi_setup() {
 
     int idx = run_wifi_picker(aps, n);
     splash_hide_list();
-    if (idx < 0) continue;  // ESC: rescan
+    if (idx < 0) return;  // ESC / menu button: back to Settings
 
     char password[WIFI_MGR_PASS_LEN];
     password[0] = '\0';
@@ -417,7 +413,8 @@ static bool download_and_prepare_launch(retrostore::RetroStore &rs,
 // picker or hand off to the emulator.
 enum show_app_result_t {
   SHOW_APP_BACK,   // user pressed ESC; resume picker
-  SHOW_APP_LAUNCH  // user pressed ENTER; g_launch_cmd_* are now armed
+  SHOW_APP_LAUNCH, // user pressed ENTER; g_launch_cmd_* are now armed
+  SHOW_APP_MENU    // user pressed the A7 menu button; exit to main menu
 };
 
 // Show details for the given app and block until ESC (back) or ENTER (start).
@@ -481,9 +478,9 @@ static show_app_result_t show_app_details(retrostore::RetroStore &rs,
   // immediately trigger the launch below.
   drain_bt_events();
 
-  // Wait for ESC (back) or ENTER (download + start).
-  const uint8_t keys[] = { HID_ESC, HID_ENTER };
-  uint8_t pressed = wait_for_any_hid_press(keys, 2);
+  // Wait for ESC / menu button (back) or ENTER (download + start).
+  const uint8_t keys[] = { HID_ESC, HID_ENTER, HID_MENU_BTN };
+  uint8_t pressed = wait_for_any_hid_press(keys, 3);
 
   splash_set_subtext("");
   splash_set_subtext_right("");
@@ -494,7 +491,7 @@ static show_app_result_t show_app_details(retrostore::RetroStore &rs,
     }
     // Fetch failed; fall through to "back" so user can pick something else.
   }
-  return SHOW_APP_BACK;
+  return (pressed == HID_MENU_BTN) ? SHOW_APP_MENU : SHOW_APP_BACK;
 }
 
 static void run_retrostore_browse() {
@@ -541,16 +538,19 @@ static void run_retrostore_browse() {
     } else if (ch == K_ENTER) {
       show_app_result_t r = show_app_details(rs, apps[sel].id);
       if (r == SHOW_APP_LAUNCH) {
-        // Game image is staged in g_launch_cmd_*; let the caller dismiss
-        // the splash and hand off to z80_task.
+        // Game image is staged in g_launch_cmd_*; the caller starts the
+        // game session.
         return;
+      }
+      if (r == SHOW_APP_MENU) {
+        break;  // A7: straight back to the main menu
       }
       // Drain any stale key events (e.g. the release of the ESC the user
       // hit to leave the details screen) before resuming the picker.
       drain_bt_events();
       splash_set_status("Select a game (UP/DOWN, ENTER):");
       splash_show_list(items, n, sel);
-    } else if (ch == K_ESC) {
+    } else if (ch == K_ESC || ch == K_MENU) {
       break;
     }
   }
@@ -558,156 +558,147 @@ static void run_retrostore_browse() {
   splash_hide_list();
 }
 
-void keyb_task(void* arg) {
-  esp_err_t ret;
+// ---- Background connectivity tasks -----------------------------------------
+//
+// BT and Wi-Fi both come up in the background; the main menu never blocks
+// on either. The board buttons work from the first frame.
 
-  // To test the Pairing code entry, uncomment the following line as pairing info is
-  // kept in the nvs. Pairing will then be required on every boot.
-  // ESP_ERROR_CHECK(nvs_flash_erase());
-
-  ret = nvs_flash_init();
-  if ((ret == ESP_ERR_NVS_NO_FREE_PAGES) || (ret == ESP_ERR_NVS_NEW_VERSION_FOUND)) {
-    ESP_ERROR_CHECK(nvs_flash_erase());
-    ret = nvs_flash_init();
-  }
-  ESP_ERROR_CHECK(ret);
-
+static void bt_task(void *arg) {
+  (void) arg;
   if (bt_keyboard.setup(pairing_handler, keyboard_connected_handler,
                         keyboard_lost_connection_handler)) { // Must be called once
-
 #if CONFIG_TRASHBOY_BT_SCAN_ENABLED
-    // Try to auto-connect to previously paired keyboard, retry continuously if paired but not connected
+    // Try to auto-connect a previously paired keyboard; fall back to a
+    // pairing scan until something connects.
     while (!bt_keyboard.is_connected()) {
       bt_keyboard.auto_connect_bonded_device();
-
-      // Wait a bit to see if connection establishes
       vTaskDelay(pdMS_TO_TICKS(2000));
-
-      // If still not connected after auto-connect attempt
       if (!bt_keyboard.is_connected()) {
-        // Check if we have bonded devices by attempting another auto-connect
-        // (auto_connect_bonded_device returns early if no bonded devices exist)
         bt_keyboard.auto_connect_bonded_device();
         vTaskDelay(pdMS_TO_TICKS(1000));
-
-        // If still not connected, it means either no bonded device exists
-        // or the bonded device is not available. Try scanning for new devices.
         if (!bt_keyboard.is_connected()) {
           ESP_LOGI(TAG, "Scanning for keyboards to pair...");
-          splash_set_status("Scanning for Bluetooth keyboard...");
-          bt_keyboard.devices_scan(); // Required to discover new keyboards and for pairing
-                                      // Default duration is 5 seconds
+          bt_keyboard.devices_scan();  // default duration is 5 seconds
           vTaskDelay(pdMS_TO_TICKS(5000));
         }
       }
     }
+    ESP_LOGI(TAG, "----> BT keyboard ready <----");
 #else
-    // Developer toggle (CONFIG_TRASHBOY_BT_SCAN_ENABLED=n): skip the
-    // connect/scan loop. Make one best-effort auto-connect attempt so a
-    // paired keyboard still works if present, then continue regardless.
+    // Developer toggle (CONFIG_TRASHBOY_BT_SCAN_ENABLED=n): one best-effort
+    // auto-connect attempt so a paired keyboard still works if present.
     ESP_LOGW(TAG, "Bluetooth keyboard scanning disabled "
                   "(CONFIG_TRASHBOY_BT_SCAN_ENABLED=n)");
     bt_keyboard.auto_connect_bonded_device();
-    vTaskDelay(pdMS_TO_TICKS(1000));
 #endif
+  }
+  vTaskDelete(NULL);
+}
 
-    splash_set_paired();
+// Wi-Fi status-bar text. Ping-pong between two buffers so a snprintf into
+// one never tears the string the LVGL task is currently applying.
+static char g_wifi_bar_buf[2][64];
+static int  g_wifi_bar_idx = 0;
 
-#if CONFIG_TRASHBOY_BT_SCAN_ENABLED
-    // Wait for the user to press ENTER (HID 0x28) or keypad ENTER (0x58)
-    // to dismiss the splash and let the TRS-80 boot.
-    while (true) {
-      BTKeyboard::KeyInfo inf;
-      if (!input_wait_event(inf, pdMS_TO_TICKS(100))) continue;
-      if (key_report_contains(inf, 0x28) || key_report_contains(inf, 0x58)) break;
-    }
-#else
-    // Without a keyboard to press ENTER, just give the splash a moment of
-    // visibility, then proceed automatically.
-    vTaskDelay(pdMS_TO_TICKS(1500));
+static void wifi_bar_set(const char *fmt, ...) {
+  g_wifi_bar_idx ^= 1;
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(g_wifi_bar_buf[g_wifi_bar_idx], sizeof(g_wifi_bar_buf[0]), fmt, ap);
+  va_end(ap);
+  splash_set_statusbar(g_wifi_bar_buf[g_wifi_bar_idx]);
+}
+
+// Auto-connect from preset/stored credentials, then keep the status bar in
+// sync with reality (Settings may connect later, or the AP may drop).
+static void wifi_bg_task(void *arg) {
+  (void) arg;
+  wifi_mgr_init();
+
+  char ssid[WIFI_MGR_SSID_LEN];
+  char password[WIFI_MGR_PASS_LEN];
+  bool have = false;
+#if CONFIG_TRASHBOY_WIFI_USE_PRESET
+  // Developer toggle: SSID/password baked into the firmware.
+  if (CONFIG_TRASHBOY_WIFI_PRESET_SSID[0] != '\0') {
+    strlcpy(ssid, CONFIG_TRASHBOY_WIFI_PRESET_SSID, sizeof(ssid));
+    strlcpy(password, CONFIG_TRASHBOY_WIFI_PRESET_PASSWORD, sizeof(password));
+    have = true;
+  } else {
+    ESP_LOGW(TAG, "CONFIG_TRASHBOY_WIFI_USE_PRESET=y but SSID is empty");
+  }
 #endif
+  if (!have) {
+    have = wifi_mgr_load_creds(ssid, sizeof(ssid), password, sizeof(password));
+  }
 
-    // Drive the splash through Wi-Fi setup (scan -> pick -> password ->
-    // connect, or auto-connect from NVS-stored credentials).
-    run_wifi_setup();
-    vTaskDelay(pdMS_TO_TICKS(800));  // brief pause so the user sees "Connected"
+  if (have) {
+    wifi_bar_set("connecting to %s...", ssid);
+    ESP_LOGI(TAG, "Wi-Fi auto-connect to '%s'", ssid);
+    wifi_mgr_connect(ssid, password, 25000);
+  } else {
+    wifi_bar_set("not configured - see Settings");
+  }
 
-    // Browse the RetroStore catalog: list, select with arrows + ENTER,
-    // ENTER opens details (any key returns), ESC continues to TRS-80 boot.
-    run_retrostore_browse();
-
-    // Hand the LVGL teardown off to the pump task so it happens on the
-    // same core that drives lv_timer_handler.
-    splash_dismiss_requested = true;
-    while (!splash_dismissed) {
-      vTaskDelay(pdMS_TO_TICKS(10));
-    }
-
-    while (true) {
-      vTaskDelay(pdMS_TO_TICKS(5));
-      BTKeyboard::KeyInfo inf;
-
-      input_wait_event(inf);
-      if ((inf.size == 4 && inf.keys[2] == 2    /* F5 */) ||
-          (inf.size == 8 && inf.keys[2] == 0x3e /* F5 on Rii */)) {
-        z80_pause();
-        configure_pocket_trs();
-        z80_resume();
-      } else if (inf.size > 4 && inf.keys[0] == 5 && (inf.keys[1] == 0x4c || inf.keys[2] == 0x4c) /* Ctrl+Alt+Del */) {
-        do_z80_reset = true;
+  bool last = false, first = true;
+  for (;;) {
+    bool c = wifi_mgr_is_connected();
+    if (c != last || first) {
+      first = false;
+      last = c;
+      if (c) {
+        // Settings saves creds on success, so NVS knows the current SSID.
+        char cs[WIFI_MGR_SSID_LEN], cp[WIFI_MGR_PASS_LEN];
+        if (wifi_mgr_load_creds(cs, sizeof(cs), cp, sizeof(cp))) {
+          wifi_bar_set("%s", cs);
+        } else if (have) {
+          wifi_bar_set("%s", ssid);
+        } else {
+          wifi_bar_set("connected");
+        }
       } else {
-        process_key(inf);
+        wifi_bar_set(have ? "offline" : "not configured - see Settings");
       }
     }
+    vTaskDelay(pdMS_TO_TICKS(2000));
   }
 }
 
-void ui_task(void *arg)
-{
+// ---- Menu flows (flow_task is the single input consumer) -------------------
 
-  while (1) {
-    trs_screen.render();
-    vTaskDelay(pdMS_TO_TICKS(5));
-    lv_timer_handler();
+// Show a list menu; returns the chosen index, or -1 on ESC / A7.
+static int run_menu_select(const char *title, const char * const *items, int n) {
+  int sel = 0;
+  // Kill any armed key-repeat from the keypress that got us here, so a
+  // slowly-released ENTER can't phantom-select item 0.
+  input_flush();
+  splash_set_status(title);
+  splash_show_list(items, n, sel);
+  while (true) {
+    char ch = input_wait_ascii(true);
+    if (ch == K_DOWN) {
+      if (sel < n - 1) splash_set_list_selection(++sel);
+    } else if (ch == K_UP) {
+      if (sel > 0) splash_set_list_selection(--sel);
+    } else if (ch == K_ENTER) {
+      splash_hide_list();
+      return sel;
+    } else if (ch == K_ESC || ch == K_MENU) {
+      splash_hide_list();
+      return -1;
+    }
   }
 }
 
-void z80_task(void *arg)
-{
-  init_settings();
-  init_storage();
-  init_events();
-  init_trs_io();
-  init_trs_fs_posix();
-  // init_wifi() (from trs-io) is intentionally NOT called: it auto-connects
-  // from its own NVS keys and starts the web-config AP if no creds are
-  // stored. We drive the whole Wi-Fi lifecycle from the splash via
-  // wifi_manager so the user can pick a network with the BT keyboard.
-  init_trs_lib();
-  init_sound();
+// Run one game session: switch the display to the emulator, boot the Z80
+// (optionally straight into a downloaded CMD), and pump input into the
+// emulator until the A7 menu button ends the session.
+static void run_game_session() {
+  wait_z80_ready();
+  ui_set_mode(UI_MODE_GAME);
 
-  // Wait for the splash screen to be dismissed (keyboard paired and ENTER pressed)
-  // before bringing up the TRS-80 screen, otherwise trs_screen.init() would create
-  // a full-screen canvas that hides the splash.
-  while (!splash_dismissed) {
-    vTaskDelay(pdMS_TO_TICKS(20));
-  }
-
-  // Hand the display back to the TRS-80 emulator's coordinate system:
-  // TRSCanvas does its own manual rotation of pixels into an unrotated
-  // 480x640 native canvas, so LVGL must be at ROTATION_0 here (otherwise
-  // trs_screen.init() reads the wrong horizontal/vertical resolution and
-  // we get a double-rotated picture). The flush callback adapts based on
-  // the current rotation and just blits straight through when it's 0.
-  lv_display_set_rotation(lv_display_get_default(), LV_DISPLAY_ROTATION_0);
-
-  trs_screen.init();
-  trs_screen.push(new ScreenBuffer(MODE_TEXT_64x16));
   mem_init();
   z80_reset();
-
-  // If the splash flow downloaded a CMD via the RetroStore browser, load
-  // it over the freshly-reset Z80 memory and jump straight into it.
   if (g_launch_cmd_data != nullptr && g_launch_cmd_size > 0) {
     ESP_LOGI(TAG, "Loading launched CMD (%u bytes) into Z80 memory",
              (unsigned) g_launch_cmd_size);
@@ -722,8 +713,105 @@ void z80_task(void *arg)
     g_launch_cmd_data = nullptr;
     g_launch_cmd_size = 0;
   }
+  z80_resume();
 
-  xTaskCreatePinnedToCore(ui_task, "ui_task", 6000, NULL, 5, NULL, 1);
+  while (true) {
+    BTKeyboard::KeyInfo inf;
+    if (!input_wait_event(inf, pdMS_TO_TICKS(500))) continue;
+    if (key_report_contains(inf, HID_MENU_BTN)) {
+      break;  // A7: kill the game, back to the main menu
+    }
+    if ((inf.size == 4 && inf.keys[2] == 2    /* F5 */) ||
+        (inf.size == 8 && inf.keys[2] == 0x3e /* F5 on Rii */)) {
+      z80_pause();
+      configure_pocket_trs();
+      z80_resume();
+    } else if (inf.size > 4 && inf.keys[0] == 5 &&
+               (inf.keys[1] == 0x4c || inf.keys[2] == 0x4c) /* Ctrl+Alt+Del */) {
+      do_z80_reset = true;
+    } else {
+      process_key(inf);
+    }
+  }
+
+  z80_pause();
+  if (trsSamplesGenerator != nullptr) {
+    trsSamplesGenerator->flush();  // don't let a dying beep linger
+  }
+  ui_set_mode(UI_MODE_MENU);
+  drain_bt_events();
+  ESP_LOGI(TAG, "Game session ended - back to main menu");
+}
+
+// The trs-lib settings UI renders into the TRS screen, so show the emulator
+// screen for it — with the Z80 kept paused. Also reachable in-game via F5.
+static void run_trs_config() {
+  wait_z80_ready();
+  ui_set_mode(UI_MODE_GAME);
+  // Settle + flush so the ENTER that selected this entry can't leak into
+  // (or phantom-repeat inside) the trs-lib menu and auto-open "Configure".
+  drain_bt_events();
+  configure_pocket_trs();
+  ui_set_mode(UI_MODE_MENU);
+  drain_bt_events();
+}
+
+static void run_settings_menu() {
+  while (true) {
+    static const char *items[] = { "Wi-Fi Setup", "TRS-80 Config", "Back" };
+    int sel = run_menu_select("Settings", items, 3);
+    if (sel == 0) {
+      run_wifi_interactive_setup();
+      splash_hide_list();
+    } else if (sel == 1) {
+      run_trs_config();
+    } else {
+      return;  // "Back", ESC or A7
+    }
+  }
+}
+
+static void flow_task(void *arg) {
+  (void) arg;
+  splash_set_compact();
+  while (true) {
+    static const char *items[] = { "Games", "Settings" };
+    int sel = run_menu_select("Main Menu", items, 2);
+    if (sel == 0) {
+      if (!wifi_mgr_is_connected()) {
+        splash_set_status("Wi-Fi not connected - see Settings");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        continue;
+      }
+      run_retrostore_browse();
+      if (g_launch_cmd_data != nullptr) {
+        run_game_session();
+      }
+    } else if (sel == 1) {
+      run_settings_menu();
+    }
+  }
+}
+
+void z80_task(void *arg)
+{
+  init_settings();
+  init_storage();
+  init_events();
+  init_trs_io();
+  init_trs_fs_posix();
+  // init_wifi() (from trs-io) is intentionally NOT called: it auto-connects
+  // from its own NVS keys and starts the web-config AP if no creds are
+  // stored. We drive the whole Wi-Fi lifecycle from the menu via
+  // wifi_manager.
+  init_trs_lib();
+  init_sound();
+
+  // Idle until the first game session resumes us. z80_run() sleeps in
+  // 100 ms slices while paused; run_game_session() does the per-launch
+  // mem_init / z80_reset / CMD load and then z80_resume().
+  z80_pause();
+  g_z80_ready = true;
 
   while (1) {
     if (do_z80_reset) {
@@ -734,45 +822,48 @@ void z80_task(void *arg)
   }
 }
 
-// Set to 1 to bring back the lvgl_pump_task diagnostics — used to tell
-// from serial whether a render hang is inside LVGL (we'd see "before"
-// but never "after") and whether the pump loop is still iterating.
-// Off by default since it's chatty.
-#define LVGL_PUMP_DEBUG_LOGS 0
-
-void lvgl_pump_task(void *arg)
+// Owns ALL LVGL work forever: applies UI-mode transitions, ticks whichever
+// UI is active, and pumps lv_timer_handler. Keeping every LVGL call on this
+// one task (core 1) avoids the cross-core render races we fought earlier.
+static void display_task(void *arg)
 {
-  // Drives LVGL while the splash is up, and tears it down on this same task
-  // so all LVGL calls stay on a single core. Exits once dismissed; ui_task
-  // takes over driving lv_timer_handler from then on.
-#if LVGL_PUMP_DEBUG_LOGS
-  uint32_t iter = 0;
-  uint32_t last_heartbeat_ms = 0;
-#endif
-  while (!splash_dismiss_requested) {
-    splash_tick();
-#if LVGL_PUMP_DEBUG_LOGS
-    if (iter < 5 || (iter & 0xFFF) == 0) {
-      ESP_LOGI(TAG, "lv_timer_handler before (iter=%lu)", (unsigned long) iter);
+  (void) arg;
+  while (true) {
+    if (g_ui_mode_req != g_ui_mode_cur) {
+      if (g_ui_mode_req == UI_MODE_GAME) {
+        // TRSCanvas pre-rotates its pixels into an unrotated 480x640 native
+        // canvas, so LVGL must be at ROTATION_0 (the adaptive flush callback
+        // then blits straight through). trs_screen.init() must run at
+        // ROTATION_0 too — it reads the display resolution.
+        lv_display_set_rotation(lv_display_get_default(), LV_DISPLAY_ROTATION_0);
+        if (!g_trs_screen_inited) {
+          trs_screen.init();
+          trs_screen.push(new ScreenBuffer(MODE_TEXT_64x16));
+          g_trs_screen_inited = true;
+        } else {
+          trs_screen.setVisible(true);
+        }
+        trs_screen.refresh();
+      } else {
+        // Hide the emulator canvas and give the display back to the menu UI
+        // (rotated landscape). The splash widgets survived underneath the
+        // canvas; a full invalidate repaints them through the sw-rotate path.
+        trs_screen.setVisible(false);
+        lv_display_set_rotation(lv_display_get_default(), LV_DISPLAY_ROTATION_270);
+        lv_obj_invalidate(lv_scr_act());
+      }
+      g_ui_mode_cur = g_ui_mode_req;
+      xSemaphoreGive(g_ui_mode_done);
     }
-#endif
+
+    if (g_ui_mode_cur == UI_MODE_GAME) {
+      trs_screen.render();
+    } else {
+      splash_tick();
+    }
     lv_timer_handler();
-#if LVGL_PUMP_DEBUG_LOGS
-    if (iter < 5 || (iter & 0xFFF) == 0) {
-      ESP_LOGI(TAG, "lv_timer_handler after  (iter=%lu)", (unsigned long) iter);
-    }
-    iter++;
-    uint32_t now = (uint32_t) (xTaskGetTickCount() * portTICK_PERIOD_MS);
-    if (now - last_heartbeat_ms >= 2000) {
-      ESP_LOGI(TAG, "lvgl_pump alive: iter=%lu", (unsigned long) iter);
-      last_heartbeat_ms = now;
-    }
-#endif
     vTaskDelay(pdMS_TO_TICKS(5));
   }
-  splash_dismiss();
-  splash_dismissed = true;
-  vTaskDelete(NULL);
 }
 
 // Periodically log free heap in internal SRAM and PSRAM, plus the largest
@@ -830,13 +921,27 @@ extern "C" void app_main(void)
   input_test_run();
 #endif
 
-  splash_init();
+  // NVS underpins BT bonding and Wi-Fi credentials; bring it up before
+  // either connectivity task. (To force BT re-pairing on every boot,
+  // temporarily add an nvs_flash_erase() here.)
+  esp_err_t ret = nvs_flash_init();
+  if ((ret == ESP_ERR_NVS_NO_FREE_PAGES) || (ret == ESP_ERR_NVS_NEW_VERSION_FOUND)) {
+    ESP_ERROR_CHECK(nvs_flash_erase());
+    ret = nvs_flash_init();
+  }
+  ESP_ERROR_CHECK(ret);
 
-  // 8 KB stack: the LVGL render pipeline with widget transforms (rotation +
-  // scale) recurses deep enough to overflow the typical 4 KB stack when
-  // many transformed labels are present, which silently wedges the task.
-  xTaskCreatePinnedToCore(lvgl_pump_task, "lvgl_pump", 8192, NULL, 5, NULL, 1);
-  xTaskCreatePinnedToCore(keyb_task, "keyb_task", 6000, NULL, 5, NULL, 0);
+  splash_init();
+  splash_set_statusbar("starting...");
+  g_ui_mode_done = xSemaphoreCreateBinary();
+
+  // display_task owns all LVGL work (8 KB stack: the render pipeline
+  // recurses deep enough to overflow 4 KB). flow_task drives the menus and
+  // is the single input consumer; BT + Wi-Fi come up in the background.
+  xTaskCreatePinnedToCore(display_task, "display", 8192, NULL, 5, NULL, 1);
+  xTaskCreatePinnedToCore(flow_task, "ui_flow", 8192, NULL, 5, NULL, 0);
+  xTaskCreatePinnedToCore(bt_task, "bt_task", 6000, NULL, 5, NULL, 0);
+  xTaskCreatePinnedToCore(wifi_bg_task, "wifi_bg", 4096, NULL, 4, NULL, 0);
   xTaskCreatePinnedToCore(heap_diag_task, "heap_diag", 3072, NULL, 1, NULL, 0);
   z80_task(NULL);
 }

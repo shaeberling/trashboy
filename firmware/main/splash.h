@@ -21,6 +21,11 @@ void splash_set_subtext(const char *text);
 // but right-aligned. Pass NULL or "" to hide.
 void splash_set_subtext_right(const char *text);
 
+// Bottom status bar (white box, black lettering, Wi-Fi symbol prefix).
+// Shows system status — currently the Wi-Fi state. The string must remain
+// valid until the next call (use literals or a stable buffer).
+void splash_set_statusbar(const char *text);
+
 // Apply any pending status updates. Call from the LVGL-driving task.
 void splash_tick(void);
 

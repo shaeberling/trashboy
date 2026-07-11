@@ -41,6 +41,12 @@ static const char *TAG = "splash";
 #define LIST_FONT              (&lv_font_montserrat_20)
 #define SUBTEXT_FONT           (&lv_font_montserrat_14)
 
+// Bottom system-status bar: white box, black lettering (contrast against
+// the black screen), full width.
+#define STATUSBAR_H            30
+#define STATUSBAR_FONT         (&lv_font_montserrat_14)
+#define STATUSBAR_PAD_X        12
+
 static int g_status_user_top  = 0;
 static int g_list_user_top    = 0;
 static int g_subtext_user_top = 0;
@@ -50,10 +56,13 @@ static lv_obj_t *splash_logo         = NULL;
 static lv_obj_t *splash_status       = NULL;
 static lv_obj_t *splash_subtext      = NULL;
 static lv_obj_t *splash_subtext_right = NULL;
+static lv_obj_t *statusbar_box       = NULL;
+static lv_obj_t *statusbar_label     = NULL;
 
 static const char * volatile pending_status        = NULL;
 static const char * volatile pending_subtext       = NULL;
 static const char * volatile pending_subtext_right = NULL;
+static const char * volatile pending_statusbar     = NULL;
 static volatile bool pending_compact = false;
 
 typedef enum { LIST_OP_NONE, LIST_OP_SHOW, LIST_OP_SEL, LIST_OP_HIDE } list_op_t;
@@ -85,7 +94,8 @@ static void apply_layout(bool compact)
     // list/subtext @ MS14 ≈ 14 px).
     g_status_user_top  = user_top + logo_h + (compact ? 14 : 36);
     g_list_user_top    = g_status_user_top + 32;     // clear of MS24 status
-    g_subtext_user_top = USER_H - 22;                 // clear of MS14 subtext
+    // Subtext sits just above the bottom status bar.
+    g_subtext_user_top = USER_H - STATUSBAR_H - 22;
 
     if (splash_status) {
         lv_obj_set_pos(splash_status, TEXT_USER_LEFT, g_status_user_top);
@@ -127,7 +137,7 @@ void splash_init(void)
     lv_obj_set_style_bg_opa(splash_logo, LV_OPA_TRANSP, 0);
 
     splash_status = lv_label_create(splash_root);
-    lv_label_set_text(splash_status, "Scanning for Bluetooth keyboard...");
+    lv_label_set_text(splash_status, "");
     lv_obj_set_style_text_color(splash_status, lv_color_white(), 0);
     lv_obj_set_style_text_font(splash_status, STATUS_FONT, 0);
     lv_obj_set_style_bg_opa(splash_status, LV_OPA_TRANSP, 0);
@@ -135,10 +145,33 @@ void splash_init(void)
     lv_label_set_long_mode(splash_status, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(splash_status, LV_TEXT_ALIGN_CENTER, 0);
 
+    // Bottom system-status bar: white box with black lettering.
+    statusbar_box = lv_obj_create(splash_root);
+    lv_obj_remove_style_all(statusbar_box);
+    lv_obj_set_size(statusbar_box, USER_W, STATUSBAR_H);
+    lv_obj_set_pos(statusbar_box, 0, USER_H - STATUSBAR_H);
+    lv_obj_set_style_bg_color(statusbar_box, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(statusbar_box, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(statusbar_box, LV_OBJ_FLAG_SCROLLABLE);
+
+    statusbar_label = lv_label_create(statusbar_box);
+    lv_obj_set_style_text_color(statusbar_label, lv_color_black(), 0);
+    lv_obj_set_style_text_font(statusbar_label, STATUSBAR_FONT, 0);
+    lv_obj_set_style_bg_opa(statusbar_label, LV_OPA_TRANSP, 0);
+    lv_label_set_long_mode(statusbar_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_width(statusbar_label, USER_W - 2 * STATUSBAR_PAD_X);
+    lv_obj_align(statusbar_label, LV_ALIGN_LEFT_MID, STATUSBAR_PAD_X, 0);
+    lv_label_set_text(statusbar_label, LV_SYMBOL_WIFI "  ...");
+
     apply_layout(false /* start big */);
 
     ESP_LOGI(TAG, "splash created (landscape %dx%d via lv_display rotation)",
              USER_W, USER_H);
+}
+
+void splash_set_statusbar(const char *text)
+{
+    pending_statusbar = text ? text : "";
 }
 
 void splash_set_status(const char *text)
@@ -307,6 +340,14 @@ void splash_tick(void)
         apply_subtext_right(str);
     }
 
+    const char *bar = pending_statusbar;
+    if (bar != NULL) {
+        pending_statusbar = NULL;
+        if (statusbar_label != NULL) {
+            lv_label_set_text_fmt(statusbar_label, LV_SYMBOL_WIFI "  %s", bar);
+        }
+    }
+
     list_op_t op = pending_list_op;
     if (op != LIST_OP_NONE) {
         pending_list_op = LIST_OP_NONE;
@@ -332,5 +373,7 @@ void splash_dismiss(void)
         splash_root = NULL;
         splash_status = NULL;
         splash_logo = NULL;
+        statusbar_box = NULL;
+        statusbar_label = NULL;
     }
 }
