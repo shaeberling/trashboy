@@ -107,7 +107,6 @@ static bool key_report_contains(const BTKeyboard::KeyInfo &inf, uint8_t hid_code
 // HID usage codes we recognise directly from raw reports.
 static constexpr uint8_t HID_ENTER = 0x28;
 static constexpr uint8_t HID_ESC   = 0x29;
-static constexpr uint8_t HID_S     = 0x16;   // letter 'S' / 's'
 
 // Block until a HID report contains the given usage-code as a press.
 static void wait_for_hid_press(uint8_t hid_code) {
@@ -418,10 +417,10 @@ static bool download_and_prepare_launch(retrostore::RetroStore &rs,
 // picker or hand off to the emulator.
 enum show_app_result_t {
   SHOW_APP_BACK,   // user pressed ESC; resume picker
-  SHOW_APP_LAUNCH  // user pressed S; g_launch_cmd_* are now armed
+  SHOW_APP_LAUNCH  // user pressed ENTER; g_launch_cmd_* are now armed
 };
 
-// Show details for the given app and block until ESC (back) or S (start).
+// Show details for the given app and block until ESC (back) or ENTER (start).
 static show_app_result_t show_app_details(retrostore::RetroStore &rs,
                                           const std::string &app_id) {
   splash_set_status("Loading details...");
@@ -476,16 +475,20 @@ static show_app_result_t show_app_details(retrostore::RetroStore &rs,
   splash_set_status(app.name.c_str());
   splash_show_list(lines, line, -1);  // -1 = no highlight
   splash_set_subtext("ESC: back to list");
-  splash_set_subtext_right("S: download & start");
+  splash_set_subtext_right("ENTER: download & start");
 
-  // Wait for ESC (back) or S (download + start).
-  const uint8_t keys[] = { HID_ESC, HID_S };
+  // Flush the ENTER that opened this screen (and its release) so it can't
+  // immediately trigger the launch below.
+  drain_bt_events();
+
+  // Wait for ESC (back) or ENTER (download + start).
+  const uint8_t keys[] = { HID_ESC, HID_ENTER };
   uint8_t pressed = wait_for_any_hid_press(keys, 2);
 
   splash_set_subtext("");
   splash_set_subtext_right("");
 
-  if (pressed == HID_S) {
+  if (pressed == HID_ENTER) {
     if (download_and_prepare_launch(rs, app_id, app.name)) {
       return SHOW_APP_LAUNCH;
     }
