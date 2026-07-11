@@ -33,18 +33,26 @@ static const char shift_trans_dict_[] =
     "\220\220" "\221\221" "\222\222" "\177\177" "\223\223"
     "\224\224" "\225\225" "\226\226" "\227\227" "\230\230";
 
-// Button bit (pressed = 0 on the port) -> HID usage code + a FIXED slot
-// in the merged report. Slots are >= 8 so they never collide with the BT
+// Button (pressed = 0 on the port) -> HID usage code + a FIXED slot in
+// the merged report. Slots are >= 8 so they never collide with the BT
 // boot report, which only ever uses keys[0..7]. Fixed slots also keep the
 // ASCII path's per-index "newly pressed" detection stable.
-struct BtnMap { uint8_t bit; uint8_t hid; uint8_t slot; };
+//
+// The D-pad (bits 1-4) is double-assigned: pressing either column's
+// button produces the same key. Bits 5-6 are column-specific: column A
+// is CLEAR / SPACE, column B is Enter / Esc.
+enum BtnPort { PORT_A, PORT_B, PORT_AB };
+struct BtnMap { BtnPort port; uint8_t bit; uint8_t hid; uint8_t slot; };
 static const BtnMap BTN_MAP[] = {
-  { 1, 0x52, 8 },   // A1/B1 -> Up
-  { 2, 0x4F, 9 },   // A2/B2 -> Right
-  { 3, 0x51, 10 },  // A3/B3 -> Down
-  { 4, 0x50, 11 },  // A4/B4 -> Left
-  { 5, 0x28, 12 },  // A5/B5 -> Enter
-  { 6, 0x29, 13 },  // A6/B6 -> Esc
+  { PORT_AB, 1, 0x52, 8 },   // A1/B1 -> Up
+  { PORT_AB, 2, 0x4F, 9 },   // A2/B2 -> Right
+  { PORT_AB, 3, 0x51, 10 },  // A3/B3 -> Down
+  { PORT_AB, 4, 0x50, 11 },  // A4/B4 -> Left
+  { PORT_A,  5, 0x4A, 12 },  // A5 -> CLEAR (HID Home; emulator maps to VK_HOME)
+  { PORT_B,  5, 0x28, 13 },  // B5 -> Enter
+  { PORT_A,  6, 0x2C, 14 },  // A6 -> Space
+  { PORT_B,  6, 0x29, 15 },  // B6 -> Esc
+  { PORT_B,  7, 0x1E, 16 },  // B7 -> "1"
 };
 
 static QueueHandle_t     s_queue = NULL;
@@ -114,14 +122,18 @@ void input_post_bt(const KeyInfo &report) {
 extern "C" void input_on_buttons(uint8_t port_a, uint8_t port_b) {
   if (s_lock == NULL) return;
 
-  // A logical key is pressed if EITHER column's button is grounded.
-  const uint8_t pressed = (uint8_t) ~port_a | (uint8_t) ~port_b;
+  // Pressed = grounded pin. One mask per column (bit set = that column's
+  // button is down).
+  const uint8_t pa = (uint8_t) ~port_a;
+  const uint8_t pb = (uint8_t) ~port_b;
 
   KeyInfo btn;
   memset(&btn, 0, sizeof(btn));
   for (unsigned i = 0; i < sizeof(BTN_MAP) / sizeof(BTN_MAP[0]); i++) {
-    if ((pressed >> BTN_MAP[i].bit) & 1) {
-      btn.keys[BTN_MAP[i].slot] = BTN_MAP[i].hid;
+    const BtnMap &m = BTN_MAP[i];
+    uint8_t src = (m.port == PORT_A) ? pa : (m.port == PORT_B) ? pb : (pa | pb);
+    if ((src >> m.bit) & 1) {
+      btn.keys[m.slot] = m.hid;
     }
   }
   btn.modifier = (BTKeyboard::KeyModifier) 0;
