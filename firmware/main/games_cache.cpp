@@ -19,7 +19,7 @@ static const char *TAG = "games_cache";
 #define MOUNT_POINT   "/games"
 #define CATALOG_PATH  MOUNT_POINT "/catalog.bin"
 #define GAMES_MAX     512    // catalog RAM cap: 512 * ~730 B ≈ 370 KB PSRAM
-#define CMD_MAX_BYTES (64 * 1024)
+#define CMD_MAX_BYTES GAMES_CACHE_CMD_MAX_BYTES
 
 // catalog.bin: header followed by `count` cached_game_t records.
 struct catalog_header_t {
@@ -226,9 +226,13 @@ int games_cache_sync(games_sync_progress_cb progress,
     std::vector<retrostore::RsMediaImage> images;
     std::vector<retrostore::RsMediaType> types =
         { retrostore::RsMediaType_COMMAND };
-    if (rs.FetchMediaImages(nano.id, types, &images) && !images.empty() &&
-        images[0].data_size > 0 &&
-        (size_t) images[0].data_size <= CMD_MAX_BYTES) {
+    if (!rs.FetchMediaImages(nano.id, types, &images) || images.empty() ||
+        images[0].data_size <= 0) {
+      ESP_LOGI(TAG, "no COMMAND media for '%s' — not runnable", g->name);
+    } else if ((size_t) images[0].data_size > CMD_MAX_BYTES) {
+      ESP_LOGW(TAG, "CMD for '%s' too large: %d bytes (max %d) — skipping",
+               g->name, images[0].data_size, CMD_MAX_BYTES);
+    } else {
       const size_t sz = (size_t) images[0].data_size;
       uint8_t *copy = (uint8_t *) heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
       if (copy == nullptr) {
@@ -247,8 +251,6 @@ int games_cache_sync(games_sync_progress_cb progress,
         ESP_LOGE(TAG, "no PSRAM to stage '%s' (%u bytes); skipping",
                  g->name, (unsigned) sz);
       }
-    } else {
-      ESP_LOGI(TAG, "no runnable CMD image for '%s'", g->name);
     }
 
     if (staged_bytes >= STAGE_BUDGET_BYTES) {

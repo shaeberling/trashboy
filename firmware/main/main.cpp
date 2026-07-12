@@ -178,6 +178,31 @@ static void drain_bt_events(int settle_ms = 150) {
   input_flush();
 }
 
+// Block until any key/button PRESS (a report containing at least one
+// pressed key or modifier; releases are all-zero reports and don't count).
+static void wait_for_any_press() {
+  BTKeyboard::KeyInfo inf;
+  while (true) {
+    if (!input_wait_event(inf, portMAX_DELAY)) continue;
+    if (inf.size > 0 && inf.keys[0] != 0) return;  // modifier press
+    for (int i = 1; i < inf.size && i < BTKeyboard::MAX_KEY_DATA_SIZE; i++) {
+      if (inf.keys[i] != 0) return;
+    }
+  }
+}
+
+// Full-status error display: show `msg` until the user presses any button.
+static void show_error_screen(const char *msg) {
+  splash_hide_list();
+  splash_set_status(msg);
+  splash_set_subtext("Press any button to go back");
+  splash_set_subtext_right("");
+  drain_bt_events();   // the triggering key's release must not dismiss it
+  wait_for_any_press();
+  splash_set_subtext("");
+  drain_bt_events();
+}
+
 // ---- Wi-Fi setup flow (runs on flow_task, drawing into the splash UI) ----
 
 // ASCII codes produced by input_wait_ascii for special keys.
@@ -343,9 +368,9 @@ static int append_wrapped(int line, const std::string &text) {
 // Storage for the downloaded CMD bytes — allocated *lazily* in PSRAM the
 // first time the user starts a game. Originally this was a 64 KB static
 // array in BSS (internal SRAM), but that displaced Wi-Fi/BT coex working
-// memory and caused association timeouts. Z80 address space is 64 KB so
-// no real-world program exceeds that.
-#define LAUNCH_CMD_MAX_BYTES (64 * 1024)
+// memory and caused association timeouts. Sized to the cache's CMD cap:
+// a .cmd FILE can exceed 64 KB even though it loads into 64 KB of memory.
+#define LAUNCH_CMD_MAX_BYTES GAMES_CACHE_CMD_MAX_BYTES
 static uint8_t *g_launch_cmd_storage = nullptr;
 
 static uint8_t *get_launch_cmd_storage() {
@@ -415,6 +440,18 @@ static show_app_result_t show_cached_details(int index) {
   splash_set_subtext("");
   splash_set_subtext_right("");
 
+  if (pressed == HID_ENTER && !g->has_cmd) {
+    // Be loud about it — silently bouncing back to the list looks like a
+    // crash. Common causes: RetroStore has no CMD image for this game
+    // (cassette-era title), or sync skipped it (over-size CMD).
+    ESP_LOGW(TAG, "'%s' has no runnable image (skipped at sync?)", g->name);
+    char msg[96];
+    snprintf(msg, sizeof(msg),
+             "%.40s has no CMD program image (cassette-only game?)", g->name);
+    show_error_screen(msg);
+    return SHOW_APP_BACK;
+  }
+
   if (pressed == HID_ENTER && g->has_cmd) {
     uint8_t *buf = get_launch_cmd_storage();
     size_t size = 0;
@@ -430,8 +467,8 @@ static show_app_result_t show_cached_details(int index) {
       vTaskDelay(pdMS_TO_TICKS(500));  // let the tick apply the stack buffer
       return SHOW_APP_LAUNCH;
     }
-    splash_set_status("Failed to load game from cache");
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    ESP_LOGE(TAG, "cache read failed for '%s'", g->name);
+    show_error_screen("Failed to read game from cache - try re-syncing");
   }
   return (pressed == HID_MENU_BTN) ? SHOW_APP_MENU : SHOW_APP_BACK;
 }

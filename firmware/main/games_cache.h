@@ -13,6 +13,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// Max on-disk CMD image size. NOTE: a .cmd FILE can exceed the Z80's 64 KB
+// address space (record headers, comment blocks, overlapping load regions) —
+// Dancing Demon does. The CMD loader only pokes 16-bit addresses, so a
+// larger file is safe; this just bounds cache/PSRAM usage.
+#define GAMES_CACHE_CMD_MAX_BYTES (128 * 1024)
+
 #define GAMES_CACHE_ID_LEN      64
 #define GAMES_CACHE_NAME_LEN    64
 #define GAMES_CACHE_AUTHOR_LEN  64
