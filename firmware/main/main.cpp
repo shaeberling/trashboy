@@ -33,7 +33,8 @@ extern "C" {
 #include "trs-fs.h"
 #include "event.h"
 #include "sound.h"
-#include "retrostore.h"
+#include "games_cache.h"
+#include <string>
 #include <vector>
 
 static constexpr char const *TAG = "Main";
@@ -305,7 +306,6 @@ static void run_wifi_interactive_setup() {
   }
 }
 
-#define APP_LIST_MAX  10
 #define DETAIL_LINES_MAX 10
 // Wrap detail/description text at ≈50 chars per line. Montserrat 20 in
 // our 600-px wide text column (TEXT_WIDTH in splash.c) fits roughly 50
@@ -316,7 +316,6 @@ static void run_wifi_interactive_setup() {
 
 // Storage outlives the splash_show_list call (which keeps a pointer to the
 // caller's strings until splash_tick copies them into its own buffer).
-static char g_app_titles[APP_LIST_MAX][DETAIL_LINE_LEN];
 static char g_detail_lines[DETAIL_LINES_MAX][DETAIL_LINE_LEN];
 
 // Word-wrap `text` into the static g_detail_lines starting at index `line`.
@@ -361,55 +360,13 @@ static uint8_t *get_launch_cmd_storage() {
   return g_launch_cmd_storage;
 }
 
-// Fetch the COMMAND-type media image for `app_id`, copy into
-// g_launch_cmd_storage, parse the CMD entry address, and set the
-// g_launch_cmd_data / g_launch_cmd_size / g_launch_entry handoff state.
-// Returns true if the program is ready to be started by z80_task.
-static bool download_and_prepare_launch(retrostore::RetroStore &rs,
-                                        const std::string &app_id,
-                                        const std::string &app_name) {
-  splash_set_status("Downloading game...");
-  splash_hide_list();
-  splash_set_subtext("");
-  splash_set_subtext_right("");
+// ---- Cached-games UI --------------------------------------------------------
+//
+// The Games menu is served entirely from the offline cache (games_cache);
+// "Sync Games" in Settings populates it from RetroStore. No Wi-Fi needed
+// to browse or play once synced.
 
-  std::vector<retrostore::RsMediaImage> images;
-  std::vector<retrostore::RsMediaType> types = { retrostore::RsMediaType_COMMAND };
-  if (!rs.FetchMediaImages(app_id, types, &images) || images.empty()) {
-    ESP_LOGE(TAG, "No COMMAND image for app %s", app_id.c_str());
-    splash_set_status("No .cmd image available for this game");
-    vTaskDelay(pdMS_TO_TICKS(2500));
-    return false;
-  }
-
-  const auto &img = images[0];
-  if (img.data_size <= 0 || (size_t)img.data_size > LAUNCH_CMD_MAX_BYTES) {
-    ESP_LOGE(TAG, "CMD size %d out of bounds (max %d)",
-             img.data_size, LAUNCH_CMD_MAX_BYTES);
-    splash_set_status("Game image too large");
-    vTaskDelay(pdMS_TO_TICKS(2500));
-    return false;
-  }
-  uint8_t *buf = get_launch_cmd_storage();
-  if (!buf) {
-    splash_set_status("Out of memory for game image");
-    vTaskDelay(pdMS_TO_TICKS(2500));
-    return false;
-  }
-  memcpy(buf, img.data.get(), img.data_size);
-  g_launch_cmd_data = buf;
-  g_launch_cmd_size = (size_t) img.data_size;
-  ESP_LOGI(TAG, "Loaded %d-byte CMD '%s' for %s",
-           img.data_size, img.filename.c_str(), app_name.c_str());
-
-  char msg[80];
-  snprintf(msg, sizeof(msg), "Starting %s...", app_name.c_str());
-  splash_set_status(msg);
-  vTaskDelay(pdMS_TO_TICKS(600));
-  return true;
-}
-
-// Result from show_app_details so the caller knows whether to resume the
+// Result from show_cached_details so the caller knows whether to resume the
 // picker or hand off to the emulator.
 enum show_app_result_t {
   SHOW_APP_BACK,   // user pressed ESC; resume picker
@@ -417,145 +374,194 @@ enum show_app_result_t {
   SHOW_APP_MENU    // user pressed the A7 menu button; exit to main menu
 };
 
-// Show details for the given app and block until ESC (back) or ENTER (start).
-static show_app_result_t show_app_details(retrostore::RetroStore &rs,
-                                          const std::string &app_id) {
-  splash_set_status("Loading details...");
+// Show details for cached game `index`; ENTER loads its CMD from the cache
+// and stages it for launch.
+static show_app_result_t show_cached_details(int index) {
+  const cached_game_t *g = games_cache_get(index);
+  if (g == nullptr) return SHOW_APP_BACK;
+
   splash_hide_list();
   splash_set_subtext("");
 
-  retrostore::RsApp app;
-  if (!rs.FetchApp(app_id, &app)) {
-    ESP_LOGE(TAG, "RetroStore::FetchApp(%s) failed", app_id.c_str());
-    splash_set_status("Failed to load details");
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    return SHOW_APP_BACK;
-  }
-
-  ESP_LOGI(TAG, "App detail: %s -- %s (%d) model=%d v%s  desc_len=%u",
-           app.name.c_str(), app.author.c_str(),
-           app.release_year, (int)app.model, app.version.c_str(),
-           (unsigned)app.description.size());
-  ESP_LOGI(TAG, "  description: %s",
-           app.description.empty() ? "(empty)" : app.description.c_str());
-
-  // Build on-screen detail lines. Each line's unrotated bbox must stay
-  // within ~DETAIL_WRAP_COLS chars wide so LVGL's transformed render
-  // pipeline doesn't wedge on off-screen widgets.
+  // Build on-screen detail lines. Each line stays within ~DETAIL_WRAP_COLS
+  // chars so the splash's LV_LABEL_LONG_DOT elision doesn't kick in.
   int line = 0;
-
-  // Truncate author to first ~20 chars to keep "by X (year)" line short.
-  {
-    char who[24];
-    snprintf(who, sizeof(who), "%s", app.author.c_str());
-    snprintf(g_detail_lines[line++], DETAIL_LINE_LEN, "by %s (%d)",
-             who, app.release_year);
-  }
+  // Truncate author (%.20s) to keep the "by X (year)" line short.
+  snprintf(g_detail_lines[line++], DETAIL_LINE_LEN, "by %.20s (%d)",
+           g->author, g->release_year);
   snprintf(g_detail_lines[line++], DETAIL_LINE_LEN, "Model %d  v%s",
-           (int)app.model, app.version.c_str());
-  if (app.description.empty()) {
-    if (line < DETAIL_LINES_MAX) {
-      snprintf(g_detail_lines[line++], DETAIL_LINE_LEN, "(no description)");
-    }
+           (int)g->model, g->version);
+  if (g->description[0] == '\0') {
+    snprintf(g_detail_lines[line++], DETAIL_LINE_LEN, "(no description)");
   } else {
-    line = append_wrapped(line, app.description);
-  }
-
-  ESP_LOGI(TAG, "Showing %d detail lines:", line);
-  for (int i = 0; i < line; i++) {
-    ESP_LOGI(TAG, "  [%d] %s", i, g_detail_lines[i]);
+    line = append_wrapped(line, std::string(g->description));
   }
 
   const char *lines[DETAIL_LINES_MAX];
   for (int i = 0; i < line; i++) lines[i] = g_detail_lines[i];
 
-  splash_set_status(app.name.c_str());
+  splash_set_status(g->name);
   splash_show_list(lines, line, -1);  // -1 = no highlight
   splash_set_subtext("ESC: back to list");
-  splash_set_subtext_right("ENTER: download & start");
+  splash_set_subtext_right(g->has_cmd ? "ENTER: start" : "(no runnable image)");
 
   // Flush the ENTER that opened this screen (and its release) so it can't
   // immediately trigger the launch below.
   drain_bt_events();
 
-  // Wait for ESC / menu button (back) or ENTER (download + start).
   const uint8_t keys[] = { HID_ESC, HID_ENTER, HID_MENU_BTN };
   uint8_t pressed = wait_for_any_hid_press(keys, 3);
 
   splash_set_subtext("");
   splash_set_subtext_right("");
 
-  if (pressed == HID_ENTER) {
-    if (download_and_prepare_launch(rs, app_id, app.name)) {
+  if (pressed == HID_ENTER && g->has_cmd) {
+    uint8_t *buf = get_launch_cmd_storage();
+    size_t size = 0;
+    if (buf != nullptr &&
+        games_cache_load_cmd(index, buf, LAUNCH_CMD_MAX_BYTES, &size)) {
+      g_launch_cmd_data = buf;
+      g_launch_cmd_size = size;
+      ESP_LOGI(TAG, "Staged %u-byte cached CMD for '%s'",
+               (unsigned) size, g->name);
+      char msg[80];
+      snprintf(msg, sizeof(msg), "Starting %s...", g->name);
+      splash_set_status(msg);
+      vTaskDelay(pdMS_TO_TICKS(500));  // let the tick apply the stack buffer
       return SHOW_APP_LAUNCH;
     }
-    // Fetch failed; fall through to "back" so user can pick something else.
+    splash_set_status("Failed to load game from cache");
+    vTaskDelay(pdMS_TO_TICKS(2000));
   }
   return (pressed == HID_MENU_BTN) ? SHOW_APP_MENU : SHOW_APP_BACK;
 }
 
-static void run_retrostore_browse() {
-  splash_set_status("Fetching apps from RetroStore...");
-  splash_hide_list();
+// The splash list shows at most 10 rows; scroll a window over the catalog.
+#define GAMES_WINDOW 10
+
+static void games_show_window(int top, int count, int sel) {
+  const char *items[GAMES_WINDOW];
+  int n = count - top;
+  if (n > GAMES_WINDOW) n = GAMES_WINDOW;
+  for (int i = 0; i < n; i++) items[i] = games_cache_get(top + i)->name;
+  splash_show_list(items, n, sel - top);
+}
+
+// Browse the cached games. Returns true when a game has been staged for
+// launch (g_launch_cmd_* set).
+static bool run_games_menu() {
   splash_set_subtext("");
-
-  retrostore::RetroStore rs;
-  std::vector<retrostore::RsAppNano> apps;
-  bool ok = rs.FetchAppsNano(0, APP_LIST_MAX, &apps);
-  if (!ok || apps.empty()) {
-    ESP_LOGE(TAG, "RetroStore FetchAppsNano(0,%d) failed or empty", APP_LIST_MAX);
-    splash_set_status("RetroStore fetch failed");
+  const int count = games_cache_count();
+  if (count == 0) {
+    splash_hide_list();
+    splash_set_status("No games cached - use Settings > Sync Games");
     vTaskDelay(pdMS_TO_TICKS(2500));
-    return;
+    return false;
   }
 
-  ESP_LOGI(TAG, "RetroStore returned %u apps:", (unsigned)apps.size());
-  for (size_t i = 0; i < apps.size(); i++) {
-    const auto &a = apps[i];
-    ESP_LOGI(TAG, "  [%2u] %s -- %s (%d) model=%d v%s",
-             (unsigned)i, a.name.c_str(), a.author.c_str(),
-             a.release_year, (int)a.model, a.version.c_str());
-  }
+  static char title[32];
+  snprintf(title, sizeof(title), "Games (%d)", count);
+  splash_set_status(title);
 
-  int n = (int)apps.size();
-  if (n > APP_LIST_MAX) n = APP_LIST_MAX;
-  const char *items[APP_LIST_MAX];
-  for (int i = 0; i < n; i++) {
-    snprintf(g_app_titles[i], sizeof(g_app_titles[i]), "%s", apps[i].name.c_str());
-    items[i] = g_app_titles[i];
-  }
-
-  int sel = 0;
-  splash_set_status("Select a game (UP/DOWN, ENTER):");
-  splash_show_list(items, n, sel);
+  int sel = 0, top = 0;
+  games_show_window(top, count, sel);
 
   while (true) {
     char ch = input_wait_ascii(true);
     if (ch == K_DOWN) {
-      if (sel < n - 1) { sel++; splash_set_list_selection(sel); }
+      if (sel < count - 1) {
+        sel++;
+        if (sel >= top + GAMES_WINDOW) {
+          top = sel - GAMES_WINDOW + 1;
+          games_show_window(top, count, sel);
+        } else {
+          splash_set_list_selection(sel - top);
+        }
+      }
     } else if (ch == K_UP) {
-      if (sel > 0)     { sel--; splash_set_list_selection(sel); }
+      if (sel > 0) {
+        sel--;
+        if (sel < top) {
+          top = sel;
+          games_show_window(top, count, sel);
+        } else {
+          splash_set_list_selection(sel - top);
+        }
+      }
     } else if (ch == K_ENTER) {
-      show_app_result_t r = show_app_details(rs, apps[sel].id);
-      if (r == SHOW_APP_LAUNCH) {
-        // Game image is staged in g_launch_cmd_*; the caller starts the
-        // game session.
-        return;
-      }
-      if (r == SHOW_APP_MENU) {
-        break;  // A7: straight back to the main menu
-      }
-      // Drain any stale key events (e.g. the release of the ESC the user
-      // hit to leave the details screen) before resuming the picker.
+      show_app_result_t r = show_cached_details(sel);
+      if (r == SHOW_APP_LAUNCH) return true;
+      if (r == SHOW_APP_MENU) break;  // A7: straight back to the main menu
       drain_bt_events();
-      splash_set_status("Select a game (UP/DOWN, ENTER):");
-      splash_show_list(items, n, sel);
+      splash_set_status(title);
+      games_show_window(top, count, sel);
     } else if (ch == K_ESC || ch == K_MENU) {
       break;
     }
   }
 
   splash_hide_list();
+  return false;
+}
+
+// Realign the RGB panel's DMA after a burst of internal-flash writes.
+// Flash erases stall the shared flash/PSRAM bus long enough to underrun the
+// panel's bounce buffers, which can leave the picture shifted/wrapped. The
+// driver catches most underruns itself; one explicit restart after the burst
+// guarantees a clean frame. (Deliberately NOT using LCD_RGB_RESTART_IN_VSYNC:
+// that restarts every frame, unconditionally, and flickers constantly.)
+static void lcd_resync_after_flash_writes() {
+  esp_lcd_panel_handle_t panel = (esp_lcd_panel_handle_t)
+      lv_display_get_user_data(lv_display_get_default());
+  if (panel != NULL) {
+    esp_lcd_rgb_panel_restart(panel);
+  }
+}
+
+// ---- Sync Games (Settings) --------------------------------------------------
+
+// Progress text ping-pongs between two buffers so a snprintf never tears
+// the string the LVGL task is currently applying.
+static char g_sync_msg[2][96];
+static int  g_sync_msg_idx = 0;
+
+static void sync_progress_cb(int done, int total, const char *name) {
+  g_sync_msg_idx ^= 1;
+  snprintf(g_sync_msg[g_sync_msg_idx], sizeof(g_sync_msg[0]),
+           "Syncing %d/%d: %s", done + 1, total, name);
+  splash_set_status(g_sync_msg[g_sync_msg_idx]);
+}
+
+// Bracket around each flash-write burst: warn the user (the picture may
+// drift while flash erases stall the panel's PSRAM feed), then realign the
+// panel the moment the burst ends.
+static void sync_flash_phase_cb(bool writing) {
+  if (writing) {
+    splash_set_status("Writing to flash (screen may glitch)...");
+    vTaskDelay(pdMS_TO_TICKS(120));  // let the notice reach the panel first
+  } else {
+    lcd_resync_after_flash_writes();
+  }
+}
+
+static void run_games_sync() {
+  if (!wifi_mgr_is_connected()) {
+    splash_set_status("Wi-Fi not connected - can't sync");
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    return;
+  }
+  splash_hide_list();
+  splash_set_status("Fetching game catalog...");
+  int n = games_cache_sync(sync_progress_cb, sync_flash_phase_cb);
+  g_sync_msg_idx ^= 1;
+  if (n < 0) {
+    snprintf(g_sync_msg[g_sync_msg_idx], sizeof(g_sync_msg[0]), "Sync failed");
+  } else {
+    snprintf(g_sync_msg[g_sync_msg_idx], sizeof(g_sync_msg[0]),
+             "Synced %d games", n);
+  }
+  splash_set_status(g_sync_msg[g_sync_msg_idx]);
+  vTaskDelay(pdMS_TO_TICKS(1800));
 }
 
 // ---- Background connectivity tasks -----------------------------------------
@@ -758,12 +764,15 @@ static void run_trs_config() {
 
 static void run_settings_menu() {
   while (true) {
-    static const char *items[] = { "Wi-Fi Setup", "TRS-80 Config", "Back" };
-    int sel = run_menu_select("Settings", items, 3);
+    static const char *items[] = { "Wi-Fi Setup", "Sync Games",
+                                   "TRS-80 Config", "Back" };
+    int sel = run_menu_select("Settings", items, 4);
     if (sel == 0) {
       run_wifi_interactive_setup();
       splash_hide_list();
     } else if (sel == 1) {
+      run_games_sync();
+    } else if (sel == 2) {
       run_trs_config();
     } else {
       return;  // "Back", ESC or A7
@@ -774,17 +783,18 @@ static void run_settings_menu() {
 static void flow_task(void *arg) {
   (void) arg;
   splash_set_compact();
+  // NOTE: games_cache_mount() happens in app_main BEFORE LCD_Init — flash
+  // work during early panel streaming kills the RGB DMA (see app_main).
   while (true) {
-    static const char *items[] = { "Games", "Settings" };
+    // Show the cache size in the entry itself, e.g. "Games (34)".
+    static char games_item[24];
+    snprintf(games_item, sizeof(games_item), "Games (%d)",
+             games_cache_count());
+    const char *items[] = { games_item, "Settings" };
     int sel = run_menu_select("Main Menu", items, 2);
     if (sel == 0) {
-      if (!wifi_mgr_is_connected()) {
-        splash_set_status("Wi-Fi not connected - see Settings");
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        continue;
-      }
-      run_retrostore_browse();
-      if (g_launch_cmd_data != nullptr) {
+      // Served from the offline cache — no Wi-Fi needed to browse or play.
+      if (run_games_menu()) {
         run_game_session();
       }
     } else if (sel == 1) {
@@ -799,7 +809,12 @@ void z80_task(void *arg)
   init_storage();
   init_events();
   init_trs_io();
-  init_trs_fs_posix();
+  // init_trs_fs_posix() (SD-card FS for FreHD) is intentionally NOT called:
+  // we don't use the SD slot (games come from the internal-flash cache), the
+  // probe fails noisily on every boot with no card inserted, and it re-muxes
+  // GPIO 1/2 — the same pins the ST7701S panel-init SPI uses. FreHD file ops
+  // are null-safe without it (fileio.cpp returns FR_NOT_READY). Re-enable if
+  // SD storage is ever actually used (e.g. disk-image support).
   // init_wifi() (from trs-io) is intentionally NOT called: it auto-connects
   // from its own NVS keys and starts the web-config AP if no creds are
   // stored. We drive the whole Wi-Fi lifecycle from the menu via
@@ -892,6 +907,22 @@ extern "C" void app_main(void)
   input_init();
   bt_keyboard.set_report_sink(input_post_bt);
 
+  // ALL flash-heavy initialization must happen BEFORE LCD_Init: once the
+  // RGB panel starts streaming, a multi-ms flash erase/write stalls the
+  // shared flash/PSRAM bus and can kill the panel's DMA stream while it is
+  // still establishing its first frames — with no VSYNC events left, not
+  // even esp_lcd_rgb_panel_restart() can recover it (it runs in the VSYNC
+  // handler). This was the intermittent black-screen-at-boot bug. NVS init
+  // can write during recovery/migration; the games-cache mount does
+  // wear-levelling/FAT work (and formats the partition on first boot).
+  esp_err_t ret = nvs_flash_init();
+  if ((ret == ESP_ERR_NVS_NO_FREE_PAGES) || (ret == ESP_ERR_NVS_NEW_VERSION_FOUND)) {
+    ESP_ERROR_CHECK(nvs_flash_erase());
+    ret = nvs_flash_init();
+  }
+  ESP_ERROR_CHECK(ret);
+  games_cache_mount();
+
   // Initialize I2C (required by EXIO)
   I2C_Init();
 
@@ -920,16 +951,6 @@ extern "C" void app_main(void)
   // returns.
   input_test_run();
 #endif
-
-  // NVS underpins BT bonding and Wi-Fi credentials; bring it up before
-  // either connectivity task. (To force BT re-pairing on every boot,
-  // temporarily add an nvs_flash_erase() here.)
-  esp_err_t ret = nvs_flash_init();
-  if ((ret == ESP_ERR_NVS_NO_FREE_PAGES) || (ret == ESP_ERR_NVS_NEW_VERSION_FOUND)) {
-    ESP_ERROR_CHECK(nvs_flash_erase());
-    ret = nvs_flash_init();
-  }
-  ESP_ERROR_CHECK(ret);
 
   splash_init();
   splash_set_statusbar("starting...");

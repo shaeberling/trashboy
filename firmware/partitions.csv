@@ -3,3 +3,6 @@
 nvs,        data, nvs,      0x9000,  0x6000,
 factory,0,0,        0x10000, 3M,
 flash_test, data, fat,      ,        528K,
+# Offline game cache (FAT + wear levelling): catalog.bin + one .cmd per game.
+# CMD images are <= 64K (Z80 address space), so 8M holds 100+ games.
+games,      data, fat,      ,        8M,

@@ -1,6 +1,7 @@
 idf_component_register(
                         SRCS  "main.cpp"
                               "input.cpp"
+                              "games_cache.cpp"
                               "splash.c"
                               "wifi_manager.c"
                               "logoc.c"
@@ -22,6 +23,6 @@ idf_component_register(
                                      "./Touch_Driver"
                                      "./MCP23017"
                                      "."
-                        REQUIRES ptrs trs-lib retrostore-c-sdk esp_driver_spi esp_driver_ledc esp_lcd nvs_flash bt_keyboard driver bt esp_wifi esp_netif esp_event)
+                        REQUIRES ptrs trs-lib retrostore-c-sdk esp_driver_spi esp_driver_ledc esp_lcd nvs_flash bt_keyboard driver bt esp_wifi esp_netif esp_event fatfs)
 # esp_lcd_touch_gt911 is added automatically by the IDF Component Manager
 # from main/idf_component.yml — it does not need to be listed in REQUIRES.
