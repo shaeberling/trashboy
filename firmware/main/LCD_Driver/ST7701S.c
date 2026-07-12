@@ -224,7 +224,10 @@ void LCD_Init(void)
 {
     /********************* LCD *********************/
     ST7701S_reset();
-    vTaskDelay(pdMS_TO_TICKS(100));
+    // ST7701S datasheet: wait >= 120 ms after hardware reset before sending
+    // init commands. The old 100 ms (+10 ms inside ST7701S_reset) sat right
+    // at the margin — a suspect for the intermittent black-panel boots.
+    vTaskDelay(pdMS_TO_TICKS(200));
     ST7701S_handle st7701s = ST7701S_newObject(LCD_MOSI, LCD_SCLK, LCD_CS, SPI2_HOST, SPI_METHOD);
     
     ST7701S_CS_EN();

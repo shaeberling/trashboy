@@ -22,3 +22,11 @@ CONFIG_BT_GATTC_NOTIF_REG_MAX=10
 # Bigger LVGL fonts for splash UI (status @ 24 px, list/details @ 20 px)
 CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_24=y
+
+# NOTE: do NOT enable CONFIG_LCD_RGB_RESTART_IN_VSYNC here. It restarts the
+# LCD DMA on EVERY vsync (unconditionally — see lcd_rgb_panel_try_restart_
+# transmission), which itself causes constant visible flicker. The driver's
+# default underrun detection restarts only when actually desynced, and
+# main.cpp does one explicit esp_lcd_rgb_panel_restart() after flash-write
+# bursts (game-cache mount/sync) to guarantee realignment.
+
