@@ -52,14 +52,18 @@ static const BtnMap BTN_MAP[] = {
   { PORT_B,  5, 0x28, 13 },  // B5 -> Enter
   { PORT_A,  6, 0x2C, 14 },  // A6 -> Space
   { PORT_B,  6, 0x29, 15 },  // B6 -> Esc
-  { PORT_B,  7, 0x1E, 16 },  // B7 -> "1"
+  { PORT_B,  7, 0x4E, 16 },  // B7 -> OSK toggle (HID PageDown; see main.cpp)
   { PORT_A,  7, 0x4B, 17 },  // A7 -> menu/home (HID PageUp; see main.cpp)
 };
+
+// Merged-report slot for the on-screen keyboard's single key.
+#define OSK_SLOT 18
 
 static QueueHandle_t     s_queue = NULL;
 static SemaphoreHandle_t s_lock  = NULL;
 static KeyInfo           s_bt;            // latest BT report
 static KeyInfo           s_btn;          // latest synthesized button report
+static KeyInfo           s_osk;          // latest on-screen keyboard report
 static KeyInfo           s_last_emitted; // for dedup
 
 // ASCII-translation state (were BTKeyboard members).
@@ -79,30 +83,35 @@ void input_init() {
   s_lock  = xSemaphoreCreateMutex();
   key_zero(s_bt);
   key_zero(s_btn);
+  key_zero(s_osk);
   key_zero(s_last_emitted);
   for (int i = 0; i < MAXK; i++) s_key_avail[i] = true;
 }
 
-// Union the two sources into one report and enqueue it if it changed.
-// Caller must hold s_lock. BT occupies keys[0..7]; buttons occupy their
-// fixed slots >= 8, so a per-index OR is a clean union.
+// Union the three sources into one report and enqueue it if it changed.
+// Caller must hold s_lock. BT occupies keys[0..7]; buttons and the OSK
+// occupy their fixed slots >= 8, so a per-index OR is a clean union.
 static void emit_merged_locked() {
   KeyInfo m;
   memset(&m, 0, sizeof(m));
   for (int i = 0; i < MAXK; i++) {
-    m.keys[i] = s_bt.keys[i] | s_btn.keys[i];
+    m.keys[i] = s_bt.keys[i] | s_btn.keys[i] | s_osk.keys[i];
   }
-  const uint8_t mod = (uint8_t) s_bt.modifier | (uint8_t) s_btn.modifier;
+  const uint8_t mod = (uint8_t) s_bt.modifier | (uint8_t) s_btn.modifier |
+                      (uint8_t) s_osk.modifier;
   m.modifier = (BTKeyboard::KeyModifier) mod;
   m.keys[0]  = mod;  // report byte 0 carries the modifier
 
-  // Preserve the BT report's native size when no button is held, so the
-  // size-based F5 / Ctrl-Alt-Del heuristics in keyb_task keep working.
-  // When a button IS held, grow size just enough to cover its fixed slot.
+  // Preserve the BT report's native size when no button/OSK key is held,
+  // so the size-based F5 / Ctrl-Alt-Del heuristics keep working. When one
+  // IS held, grow size just enough to cover the highest occupied slot.
   m.size = s_bt.size;
-  for (int i = MAXK - 1; i >= 0; i--) {
-    if (s_btn.keys[i]) { if (i + 1 > m.size) m.size = i + 1; break; }
+  for (int i = MAXK - 1; i >= 1; i--) {
+    if (m.keys[i]) { if (i + 1 > m.size) m.size = i + 1; break; }
   }
+  // A modifier-only report (e.g. latched OSK shift) still needs keys[0]
+  // inside the reported size.
+  if (mod != 0 && m.size == 0) m.size = 1;
 
   if (m.modifier == s_last_emitted.modifier &&
       memcmp(m.keys, s_last_emitted.keys, sizeof(m.keys)) == 0) {
@@ -142,6 +151,23 @@ extern "C" void input_on_buttons(uint8_t port_a, uint8_t port_b) {
 
   xSemaphoreTake(s_lock, portMAX_DELAY);
   s_btn = btn;
+  emit_merged_locked();
+  xSemaphoreGive(s_lock);
+}
+
+void input_post_osk(uint8_t hid, uint8_t modifier) {
+  if (s_lock == NULL) return;
+  KeyInfo r;
+  memset(&r, 0, sizeof(r));
+  r.modifier = (BTKeyboard::KeyModifier) modifier;
+  if (hid != 0) {
+    r.keys[OSK_SLOT] = hid;
+    r.size = OSK_SLOT + 1;
+  } else {
+    r.size = (modifier != 0) ? 1 : 0;
+  }
+  xSemaphoreTake(s_lock, portMAX_DELAY);
+  s_osk = r;
   emit_merged_locked();
   xSemaphoreGive(s_lock);
 }

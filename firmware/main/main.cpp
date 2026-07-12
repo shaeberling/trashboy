@@ -8,6 +8,8 @@
 #include "nvs_flash.h"
 #include "bt_keyboard.hpp"
 #include "input.hpp"
+#include "osk.h"
+#include "Touch_Driver/Touch.h"
 #include "trs-keyboard.h"
 #include "ui.h"
 #include <iostream>
@@ -134,6 +136,7 @@ static bool key_report_contains(const BTKeyboard::KeyInfo &inf, uint8_t hid_code
 static constexpr uint8_t HID_ENTER = 0x28;
 static constexpr uint8_t HID_ESC   = 0x29;
 static constexpr uint8_t HID_MENU_BTN = 0x4B;  // board button A7 (HID PageUp)
+static constexpr uint8_t HID_OSK_BTN  = 0x4E;  // board button B7 (HID PageDown)
 
 // Block until a HID report contains the given usage-code as a press.
 static void wait_for_hid_press(uint8_t hid_code) {
@@ -785,14 +788,33 @@ static void run_game_session() {
     g_launch_cmd_data = nullptr;
     g_launch_cmd_size = 0;
   }
+  // Clean the emulated keyboard matrix: if the previous session ended with
+  // a key held (board button, BT key or OSK key), its release report was
+  // discarded by the menu's input_flush() and process_key's diff state
+  // still holds the key down. An all-released report force-releases
+  // everything before the game boots.
+  {
+    BTKeyboard::KeyInfo empty;
+    memset(&empty, 0, sizeof(empty));
+    process_key(empty);
+  }
+
   z80_resume();
 
+  bool osk_btn_down = false;
   while (true) {
     BTKeyboard::KeyInfo inf;
     if (!input_wait_event(inf, pdMS_TO_TICKS(500))) continue;
     if (key_report_contains(inf, HID_MENU_BTN)) {
       break;  // A7: kill the game, back to the main menu
     }
+    // B7 toggles the on-screen touch keyboard (edge-triggered; the report
+    // itself is still forwarded below — the emulator ignores HID 0x4E).
+    const bool osk_btn = key_report_contains(inf, HID_OSK_BTN);
+    if (osk_btn && !osk_btn_down) {
+      osk_request_toggle();
+    }
+    osk_btn_down = osk_btn;
     if ((inf.size == 4 && inf.keys[2] == 2    /* F5 */) ||
         (inf.size == 8 && inf.keys[2] == 0x3e /* F5 on Rii */)) {
       z80_pause();
@@ -810,6 +832,7 @@ static void run_game_session() {
   if (trsSamplesGenerator != nullptr) {
     trsSamplesGenerator->flush();  // don't let a dying beep linger
   }
+  osk_force_hide();  // also releases any latched OSK key/shift in the hub
   ui_set_mode(UI_MODE_MENU);
   drain_bt_events();
   ESP_LOGI(TAG, "Game session ended - back to main menu");
@@ -942,6 +965,7 @@ static void display_task(void *arg)
     } else {
       splash_tick();
     }
+    osk_tick();  // on-screen keyboard: pending show/hide + touch polling
     lv_timer_handler();
     vTaskDelay(pdMS_TO_TICKS(5));
   }
@@ -1014,9 +1038,13 @@ extern "C" void app_main(void)
 #if CONFIG_TRASHBOY_INPUT_TEST_MODE
   // Developer toggle: skip the whole BT / Wi-Fi / splash / RetroStore path
   // and boot straight into the touch + button input test screen. Never
-  // returns.
+  // returns (and does its own Touch_Init).
   input_test_run();
 #endif
+
+  // GT911 touch for the on-screen keyboard. Non-fatal: without touch the
+  // OSK toggle is simply refused.
+  osk_set_touch_available(Touch_Init() == ESP_OK);
 
   splash_init();
   splash_set_statusbar("starting...");

@@ -37,6 +37,13 @@ void input_on_buttons(uint8_t port_a, uint8_t port_b);
 }
 #endif
 
+// Producer: the on-screen touch keyboard (osk.cpp). One key at a time:
+// `hid` is the currently pressed usage code (0 = none) and `modifier` the
+// HID modifier byte (0x02 = left shift, e.g. while the OSK shift is
+// latched). Each call replaces the OSK's previous state and re-emits the
+// merged report.
+void input_post_osk(uint8_t hid, uint8_t modifier);
+
 // Consumer: raw merged HID report (for process_key, F5, splash dismiss).
 bool input_wait_event(BTKeyboard::KeyInfo &inf, TickType_t timeout = portMAX_DELAY);
 

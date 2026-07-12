@@ -1,6 +1,7 @@
 idf_component_register(
                         SRCS  "main.cpp"
                               "input.cpp"
+                              "osk.cpp"
                               "games_cache.cpp"
                               "splash.c"
                               "wifi_manager.c"
