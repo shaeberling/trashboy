@@ -193,6 +193,7 @@ int games_cache_sync(games_sync_progress_cb progress,
   if (staged == nullptr) return -1;
   size_t staged_bytes = 0;
   int flush_from = 0;
+  int committed = total;  // shrinks to the consistent prefix on cancel
 
   // 2) Per game: description + COMMAND image, staged into PSRAM. Flush a
   //    batch to flash only when the staging budget fills up.
@@ -207,7 +208,12 @@ int games_cache_sync(games_sync_progress_cb progress,
     g->release_year = (uint16_t) nano.release_year;
     g->model = (uint8_t) nano.model;
 
-    if (progress) progress(i, total, g->name);
+    if (progress && !progress(i, total, g->name)) {
+      // Cancelled: games [0, i) are fully fetched; commit exactly those.
+      committed = i;
+      ESP_LOGI(TAG, "sync cancelled at %d/%d", i, total);
+      break;
+    }
 
     retrostore::RsApp app;
     if (rs.FetchApp(nano.id, &app)) {
@@ -252,9 +258,10 @@ int games_cache_sync(games_sync_progress_cb progress,
     }
   }
 
-  // 3) Final flash burst: remaining staged images + the catalog.
+  // 3) Final flash burst: remaining staged images + the catalog (only the
+  //    committed prefix on cancel).
   if (flash_phase) flash_phase(true);
-  for (int i = flush_from; i < total; i++) {
+  for (int i = flush_from; i < committed; i++) {
     if (staged[i].data == nullptr) continue;
     char path[48];
     cmd_path(path, sizeof(path), i);
@@ -276,9 +283,11 @@ int games_cache_sync(games_sync_progress_cb progress,
   bool ok = false;
   FILE *f = fopen(CATALOG_PATH, "wb");
   if (f != nullptr) {
-    catalog_header_t hdr = { CATALOG_MAGIC, CATALOG_VERSION, (uint32_t) total };
+    catalog_header_t hdr = { CATALOG_MAGIC, CATALOG_VERSION,
+                             (uint32_t) committed };
     ok = fwrite(&hdr, sizeof(hdr), 1, f) == 1 &&
-         fwrite(s_games, sizeof(cached_game_t), total, f) == (size_t) total;
+         fwrite(s_games, sizeof(cached_game_t), committed, f) ==
+             (size_t) committed;
     fclose(f);
   }
   if (flash_phase) flash_phase(false);
@@ -290,8 +299,9 @@ int games_cache_sync(games_sync_progress_cb progress,
     return -1;
   }
 
-  s_count = total;
-  ESP_LOGI(TAG, "sync complete: %d games cached", s_count);
+  s_count = committed;
+  ESP_LOGI(TAG, "sync complete: %d games cached%s", s_count,
+           committed < total ? " (cancelled)" : "");
   return s_count;
 }
 

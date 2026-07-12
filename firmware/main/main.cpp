@@ -525,11 +525,28 @@ static void lcd_resync_after_flash_writes() {
 static char g_sync_msg[2][96];
 static int  g_sync_msg_idx = 0;
 
-static void sync_progress_cb(int done, int total, const char *name) {
+static bool g_sync_cancelled = false;
+
+// Per-game progress: update text + green bar, and poll (non-blocking) for
+// a cancel press — ESC (B6) or the A7 menu button. Returning false makes
+// games_cache_sync stop and commit only the fully-downloaded games.
+static bool sync_progress_cb(int done, int total, const char *name) {
   g_sync_msg_idx ^= 1;
   snprintf(g_sync_msg[g_sync_msg_idx], sizeof(g_sync_msg[0]),
            "Syncing %d/%d: %s", done + 1, total, name);
   splash_set_status(g_sync_msg[g_sync_msg_idx]);
+  splash_set_progress(done * 100 / total);
+
+  BTKeyboard::KeyInfo inf;
+  while (input_wait_event(inf, 0)) {
+    if (key_report_contains(inf, HID_ESC) ||
+        key_report_contains(inf, HID_MENU_BTN)) {
+      g_sync_cancelled = true;
+      splash_set_status("Cancelling after current game...");
+      return false;
+    }
+  }
+  return true;
 }
 
 // Bracket around each flash-write burst: warn the user (the picture may
@@ -551,16 +568,28 @@ static void run_games_sync() {
     return;
   }
   splash_hide_list();
+  input_flush();  // start with a clean queue so a stale press can't cancel
+  g_sync_cancelled = false;
   splash_set_status("Fetching game catalog...");
+  splash_set_progress(0);  // hollow green box until games start landing
+  splash_set_subtext("ESC: cancel");
+
   int n = games_cache_sync(sync_progress_cb, sync_flash_phase_cb);
+
+  splash_set_progress(-1);
+  splash_set_subtext("");
   g_sync_msg_idx ^= 1;
   if (n < 0) {
     snprintf(g_sync_msg[g_sync_msg_idx], sizeof(g_sync_msg[0]), "Sync failed");
+  } else if (g_sync_cancelled) {
+    snprintf(g_sync_msg[g_sync_msg_idx], sizeof(g_sync_msg[0]),
+             "Sync cancelled - %d games kept", n);
   } else {
     snprintf(g_sync_msg[g_sync_msg_idx], sizeof(g_sync_msg[0]),
              "Synced %d games", n);
   }
   splash_set_status(g_sync_msg[g_sync_msg_idx]);
+  drain_bt_events();  // eat the cancel press's release
   vTaskDelay(pdMS_TO_TICKS(1800));
 }
 

@@ -51,10 +51,13 @@ const cached_game_t *games_cache_get(int index);
 // panel's picture drift, so the long network phase must be write-quiet.
 //
 // `progress` (may be null): per game, done-so-far / total / current name.
+// Return false to CANCEL: the sync stops before fetching the current game
+// and commits only the fully-downloaded games [0, done) — the cache is
+// always per-game consistent, never a half-written entry.
 // `flash_phase` (may be null): called with `true` right before a flash
 // write burst begins and `false` right after it ends — the UI uses this to
 // show a "writing" notice and to resync the LCD panel afterwards.
-typedef void (*games_sync_progress_cb)(int done, int total, const char *name);
+typedef bool (*games_sync_progress_cb)(int done, int total, const char *name);
 typedef void (*games_sync_flash_cb)(bool writing);
 int games_cache_sync(games_sync_progress_cb progress,
                      games_sync_flash_cb flash_phase);

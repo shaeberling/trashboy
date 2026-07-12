@@ -58,12 +58,20 @@ static lv_obj_t *splash_subtext      = NULL;
 static lv_obj_t *splash_subtext_right = NULL;
 static lv_obj_t *statusbar_box       = NULL;
 static lv_obj_t *statusbar_label     = NULL;
+static lv_obj_t *progress_bar        = NULL;
 
 static const char * volatile pending_status        = NULL;
 static const char * volatile pending_subtext       = NULL;
 static const char * volatile pending_subtext_right = NULL;
 static const char * volatile pending_statusbar     = NULL;
 static volatile bool pending_compact = false;
+
+// Progress bar request: INT_MIN = no change, -1 = hide, 0..100 = show/update.
+#define PROGRESS_NONE (-1000)
+static volatile int pending_progress = PROGRESS_NONE;
+
+#define PROGRESS_H       16
+#define PROGRESS_COLOR   0x40FF40  /* same green as pressed-button text */
 
 typedef enum { LIST_OP_NONE, LIST_OP_SHOW, LIST_OP_SEL, LIST_OP_HIDE } list_op_t;
 static volatile list_op_t pending_list_op = LIST_OP_NONE;
@@ -172,6 +180,39 @@ void splash_init(void)
 void splash_set_statusbar(const char *text)
 {
     pending_statusbar = text ? text : "";
+}
+
+void splash_set_progress(int percent)
+{
+    if (percent > 100) percent = 100;
+    pending_progress = percent;  // -1 hides
+}
+
+static void apply_progress(int percent)
+{
+    if (percent < 0) {
+        if (progress_bar) { lv_obj_del(progress_bar); progress_bar = NULL; }
+        return;
+    }
+    if (!progress_bar) {
+        progress_bar = lv_bar_create(splash_root);
+        lv_obj_set_size(progress_bar, TEXT_WIDTH, PROGRESS_H);
+        lv_obj_set_pos(progress_bar, TEXT_USER_LEFT, g_list_user_top + 6);
+        // Hollow track: green border, transparent inside.
+        lv_obj_set_style_bg_opa(progress_bar, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_border_color(progress_bar,
+                                      lv_color_hex(PROGRESS_COLOR), LV_PART_MAIN);
+        lv_obj_set_style_border_width(progress_bar, 2, LV_PART_MAIN);
+        lv_obj_set_style_radius(progress_bar, 4, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(progress_bar, 2, LV_PART_MAIN);
+        // Fill: solid green.
+        lv_obj_set_style_bg_color(progress_bar,
+                                  lv_color_hex(PROGRESS_COLOR), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_opa(progress_bar, LV_OPA_COVER, LV_PART_INDICATOR);
+        lv_obj_set_style_radius(progress_bar, 2, LV_PART_INDICATOR);
+        lv_bar_set_range(progress_bar, 0, 100);
+    }
+    lv_bar_set_value(progress_bar, percent, LV_ANIM_OFF);
 }
 
 void splash_set_status(const char *text)
@@ -348,6 +389,12 @@ void splash_tick(void)
         }
     }
 
+    int prog = pending_progress;
+    if (prog != PROGRESS_NONE) {
+        pending_progress = PROGRESS_NONE;
+        apply_progress(prog);
+    }
+
     list_op_t op = pending_list_op;
     if (op != LIST_OP_NONE) {
         pending_list_op = LIST_OP_NONE;
@@ -375,5 +422,6 @@ void splash_dismiss(void)
         splash_logo = NULL;
         statusbar_box = NULL;
         statusbar_label = NULL;
+        progress_bar = NULL;
     }
 }
