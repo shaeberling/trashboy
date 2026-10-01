@@ -2,6 +2,7 @@
 #include "sound.h"
 #include <driver/gptimer.h>
 #include <driver/sdm.h>
+#include <esp_rom_sys.h>
 #include <math.h>
 #include <stdint.h>
 #include "esp_log.h"
@@ -285,7 +286,7 @@ static void sound_selftest_task(void *arg)
 }
 #endif
 
-void init_sound()
+static void createSdmChannel()
 {
   sdm_config_t sdm_config = {
     .gpio_num = SDM_AUDIO_PIN,
@@ -295,6 +296,45 @@ void init_sound()
 
   ESP_ERROR_CHECK(sdm_new_channel(&sdm_config, &s_sdm_channel));
   s_sdm_channel_enabled = false;
+}
+
+void sound_release_pin()
+{
+  if (s_sdm_channel == NULL) {
+    return;
+  }
+  ESP_ERROR_CHECK(gptimer_stop(s_sdm_timer));
+  // The alarm ISR may be mid-flight on the other core; give it time to
+  // finish touching the channel before we delete it.
+  esp_rom_delay_us(200);
+  if (trsSamplesGenerator != NULL) {
+    trsSamplesGenerator->flush();
+  }
+  sdm_channel_handle_t chan = s_sdm_channel;
+  s_sdm_channel = NULL;
+  if (s_sdm_channel_enabled) {
+    ESP_ERROR_CHECK(sdm_channel_set_pulse_density(chan, 0));
+    ESP_ERROR_CHECK(sdm_channel_disable(chan));
+    s_sdm_channel_enabled = false;
+  }
+  // Deleting the channel disables the pin's output driver and releases it.
+  ESP_ERROR_CHECK(sdm_del_channel(chan));
+}
+
+void sound_reclaim_pin()
+{
+  if (s_sdm_channel != NULL) {
+    return;
+  }
+  createSdmChannel();
+  // Restore the gate state from before the release (cassette motor).
+  sdm_set_motor_state(!s_sdm_tx_enabled);
+  ESP_ERROR_CHECK(gptimer_start(s_sdm_timer));
+}
+
+void init_sound()
+{
+  createSdmChannel();
 
   trsSamplesGenerator = new TRSSamplesGenerator();
 

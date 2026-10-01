@@ -64,4 +64,15 @@ config TRASHBOY_SOUND_DIAG
       Leave disabled for normal use: the test tone would otherwise play
       over (and starve) real game audio, plus the per-second log is noise.
 
+config TRASHBOY_BATTERY_DIVIDER_X1000
+    int "Battery voltage divider factor (x1000)"
+    default 3000
+    range 1000 10000
+    help
+      Battery voltage = voltage at GPIO 4 * this / 1000. The Waveshare
+      ESP32-S3-Touch-LCD-2.8B divides the battery by 3 onto GPIO 4 (which
+      is also the SDM audio pin). Calibrate against a multimeter: read the
+      "battery" log line from Settings -> Battery, then set this to
+      3000 * meter_mV / reported_mV.
+
 endmenu

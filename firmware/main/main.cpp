@@ -35,6 +35,7 @@ extern "C" {
 #include "trs-fs.h"
 #include "event.h"
 #include "sound.h"
+#include "battery.h"
 #include "games_cache.h"
 #include <string>
 #include <vector>
@@ -851,11 +852,43 @@ static void run_trs_config() {
   drain_bt_events();
 }
 
+// Battery voltage, measured only on request: the reading borrows GPIO 4
+// from the audio driver (see battery.h), so menus keep their sound the
+// rest of the time. ENTER re-measures, ESC / A7 goes back.
+static void run_battery_screen() {
+  static char msg[2][48];
+  static int idx = 0;
+  splash_set_subtext("ENTER: measure again   ESC: back");
+  while (true) {
+    int mv = 0, pct = 0;
+    idx ^= 1;
+    if (!battery_read(&mv, &pct)) {
+      snprintf(msg[idx], sizeof(msg[0]), "Battery: read failed");
+    } else if (mv > 4300) {
+      // Above any Li-ion cell: USB with no battery (or a bad divider factor).
+      snprintf(msg[idx], sizeof(msg[0]), "Battery: %d.%02d V (no battery?)",
+               mv / 1000, (mv % 1000) / 10);
+    } else {
+      snprintf(msg[idx], sizeof(msg[0]), "Battery: %d.%02d V (~%d%%)",
+               mv / 1000, (mv % 1000) / 10, pct);
+    }
+    splash_set_status(msg[idx]);
+    input_flush();
+    char ch;
+    do {
+      ch = input_wait_ascii(true);
+    } while (ch != K_ENTER && ch != K_ESC && ch != K_MENU);
+    if (ch != K_ENTER) break;
+  }
+  splash_set_subtext("");
+  drain_bt_events();
+}
+
 static void run_settings_menu() {
   while (true) {
     static const char *items[] = { "Wi-Fi Setup", "Sync Games",
-                                   "TRS-80 Config", "Back" };
-    int sel = run_menu_select("Settings", items, 4);
+                                   "TRS-80 Config", "Battery", "Back" };
+    int sel = run_menu_select("Settings", items, 5);
     if (sel == 0) {
       run_wifi_interactive_setup();
       splash_hide_list();
@@ -863,6 +896,8 @@ static void run_settings_menu() {
       run_games_sync();
     } else if (sel == 2) {
       run_trs_config();
+    } else if (sel == 3) {
+      run_battery_screen();
     } else {
       return;  // "Back", ESC or A7
     }

@@ -30,8 +30,9 @@ this file is the working rules + hard-won gotchas.
 - I2C bus: SCL=GPIO7, SDA=GPIO15 — shared by TCA9554 expander (0x20),
   GT911 touch (INT on GPIO16), **MCP23017 button expander (0x21)**.
 - **GPIO 4 = SDM audio out** (RC filter -> Adafruit PAM8302 -> speaker).
-  Also carries the board's battery-voltage divider (audio and battery ADC
-  are mutually exclusive; see tasks).
+  Also carries the board's battery-voltage divider: Settings -> Battery
+  time-shares the pin (`sound_release_pin()` -> one-shot ADC ->
+  `sound_reclaim_pin()`), on request only, never during a game.
 - **GPIO 33-37 are consumed by octal PSRAM** despite being on the header —
   never use. GPIO 42 = SD D0 (SD unused). GPIO 43/44 = UART console.
   There is effectively **no free exposed GPIO** — hence buttons are polled

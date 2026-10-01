@@ -59,6 +59,14 @@ extern TRSSamplesGenerator* trsSamplesGenerator;
 
 void init_sound();
 void sdm_set_motor_state(bool motor_on);
+
+// Temporarily hand GPIO 4 to someone else (the battery ADC shares the pin
+// via the board's voltage divider). release stops the sample timer and
+// deletes the SDM channel, leaving the pin undriven; reclaim rebuilds the
+// channel and restarts audio. Must be called in pairs from one task, and
+// only while nothing needs sound (the settings menu, not a game).
+void sound_release_pin();
+void sound_reclaim_pin();
 uint8_t getSample();
 int sdm_get_effective_sample_rate();
 uint32_t sdm_get_ring_fill();
