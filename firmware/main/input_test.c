@@ -1,4 +1,4 @@
-// CONFIG_TRASHBOY_INPUT_TEST_MODE entry point. See input_test.h.
+// Settings -> Input Test screen. See input_test.h.
 
 #include "input_test.h"
 
@@ -26,14 +26,15 @@ static const char *TAG = "input_test";
 
 // ---------- Fireworks rendering --------------------------------------------
 //
-// One screen-sized ARGB8888 lv_canvas covers the whole UI. All bursts
+// One screen-sized ARGB8888 lv_canvas covers the whole test screen (an
+// opaque black root object laid over the menu's splash widgets). All bursts
 // rasterise their particles into the same canvas via the layer API. We
 // avoid lv_canvas_fill_bg / lv_obj_invalidate (which dirty the WHOLE
 // canvas widget -- 640x480 through the sw-rotate flush path every frame,
 // far too expensive on this hardware). Instead, each frame:
 //
 //   1) erase each particle's last-frame position with opaque black (the
-//      screen bg is black, so an opaque black canvas pixel is visually
+//      root bg is black, so an opaque black canvas pixel is visually
 //      indistinguishable from "transparent"),
 //   2) draw the new colored particle,
 //   3) call lv_obj_invalidate_area on ONE bbox enclosing the 8 erase +
@@ -69,8 +70,11 @@ typedef struct {
 static firework_burst_t s_bursts[MAX_BURSTS_IN_FLIGHT] = {0};
 static bool s_touch_ok = false;
 
-static lv_obj_t *s_canvas = NULL;
-static void     *s_canvas_buf = NULL;
+static lv_obj_t   *s_root = NULL;        // non-NULL while the screen is shown
+static lv_obj_t   *s_canvas = NULL;
+static void       *s_canvas_buf = NULL;
+static lv_indev_t *s_indev = NULL;
+static lv_timer_t *s_btn_poll_timer = NULL;
 
 // ---------- Buzzer feedback -------------------------------------------------
 
@@ -86,6 +90,7 @@ static void buzz_off_cb(void *arg)
 
 static void buzz_init(void)
 {
+    if (s_buzz_off_timer != NULL) return;  // created once, reused per show
     const esp_timer_create_args_t args = {
         .callback = buzz_off_cb,
         .name = "buzz_off",
@@ -343,15 +348,6 @@ static void on_screen_pressed(lv_event_t *e)
     ESP_LOGI(TAG, "burst @ (%d, %d)", (int) p.x, (int) p.y);
 }
 
-static void input_test_pump_task(void *arg)
-{
-    (void) arg;
-    while (true) {
-        lv_timer_handler();
-        vTaskDelay(pdMS_TO_TICKS(5));
-    }
-}
-
 // ---------- Button-state grid ----------------------------------------------
 //
 // 16 labels ("BTN A0" .. "BTN A7" left column, "BTN B0" .. "BTN B7" right
@@ -436,48 +432,88 @@ static void btn_grid_poll_cb(lv_timer_t *t)
     }
 }
 
-void input_test_run(void)
+void input_test_show(bool touch_ok)
 {
-    buzz_init();
-    input_sound_init();  // SDM speaker on GPIO4 for button-press blips
+    if (s_root != NULL) return;
 
-    if (Touch_Init() == ESP_OK) {
-        s_touch_ok = true;
-        lv_indev_t *indev = lv_indev_create();
-        lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
-        lv_indev_set_read_cb(indev, touch_read_cb);
+    buzz_init();
+
+    s_touch_ok = touch_ok;
+    if (s_touch_ok) {
+        s_indev = lv_indev_create();
+        lv_indev_set_type(s_indev, LV_INDEV_TYPE_POINTER);
+        lv_indev_set_read_cb(s_indev, touch_read_cb);
     } else {
-        ESP_LOGE(TAG, "Touch_Init failed -- staying on test screen with "
-                      "no touch input");
+        ESP_LOGW(TAG, "No touch controller -- button grid only");
     }
 
-    lv_obj_t *scr = lv_screen_active();
-    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    // Opaque black root on top of the menu's splash widgets, which stay
+    // alive underneath (same trick as the emulator canvas in GAME mode).
+    s_root = lv_obj_create(lv_screen_active());
+    lv_obj_remove_style_all(s_root);
+    lv_obj_set_size(s_root, CANVAS_W, CANVAS_H);
+    lv_obj_set_pos(s_root, 0, 0);
+    lv_obj_set_style_bg_color(s_root, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_root, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(s_root, LV_OBJ_FLAG_SCROLLABLE);
 
-    canvas_init(scr);
+    canvas_init(s_root);
 
-    lv_obj_t *label = lv_label_create(scr);
+    lv_obj_t *label = lv_label_create(s_root);
     lv_label_set_text(label, "Input Test");
     lv_obj_set_style_text_color(label, lv_color_white(), 0);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_24, 0);
     lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
 
-    btn_grid_create(scr);
-    lv_timer_create(btn_grid_poll_cb, BTN_POLL_INTERVAL_MS, NULL);
+    lv_obj_t *hint = lv_label_create(s_root);
+    lv_label_set_text(hint, "Hold MENU (A7) or ESC to exit");
+    lv_obj_set_style_text_color(hint, lv_color_white(), 0);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -12);
 
-    lv_obj_add_event_cb(scr, on_screen_pressed, LV_EVENT_PRESSED, NULL);
+    // Force a full repaint of the grid on the first poll, so a button that
+    // is already held (e.g. the ENTER that opened this screen) shows lit.
+    s_btn_shown_a = 0xFF;
+    s_btn_shown_b = 0xFF;
+    btn_grid_create(s_root);
+    s_btn_poll_timer = lv_timer_create(btn_grid_poll_cb, BTN_POLL_INTERVAL_MS, NULL);
 
-    xTaskCreatePinnedToCore(input_test_pump_task, "lvgl_pump_input_test",
-                            8192, NULL, 5, NULL, 1);
+    lv_obj_add_event_cb(s_root, on_screen_pressed, LV_EVENT_PRESSED, NULL);
 
-    ESP_LOGI(TAG, "Input test running (canvas=%dx%d ARGB8888, "
+    ESP_LOGI(TAG, "Input test shown (canvas=%dx%d ARGB8888, "
                   "particles/burst=%d, max bursts=%d, touch=%s)",
              CANVAS_W, CANVAS_H,
              PARTICLES_PER_BURST, MAX_BURSTS_IN_FLIGHT,
              s_touch_ok ? "ok" : "DISABLED");
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+}
+
+void input_test_hide(void)
+{
+    if (s_root == NULL) return;
+
+    if (s_btn_poll_timer != NULL) {
+        lv_timer_delete(s_btn_poll_timer);
+        s_btn_poll_timer = NULL;
     }
+    if (s_indev != NULL) {
+        lv_indev_delete(s_indev);
+        s_indev = NULL;
+    }
+    // Stop bursts still in flight before their canvas goes away.
+    for (int i = 0; i < MAX_BURSTS_IN_FLIGHT; i++) {
+        lv_anim_delete(&s_bursts[i], burst_anim_exec_cb);
+        s_bursts[i].active = false;
+    }
+
+    // Deletes the canvas and all labels with it; the splash widgets below
+    // get repainted through the invalidation this triggers.
+    lv_obj_delete(s_root);
+    s_root = NULL;
+    s_canvas = NULL;
+    memset(s_btn_labels, 0, sizeof(s_btn_labels));
+
+    heap_caps_free(s_canvas_buf);
+    s_canvas_buf = NULL;
+
+    ESP_LOGI(TAG, "Input test hidden");
 }

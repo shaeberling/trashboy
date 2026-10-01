@@ -99,13 +99,18 @@ static volatile bool do_z80_reset = false;
 // button kills the running game and returns to the menu. All LVGL work —
 // including the mode transition itself — happens on display_task; other
 // tasks request a mode and block until it has been applied.
+//
+// INPUT_TEST (Settings -> Input Test) is an overlay on the menu UI: same
+// rotation, splash widgets covered but alive. Like GAME it is only ever
+// entered from, and left to, MENU.
 
-enum ui_mode_t { UI_MODE_MENU, UI_MODE_GAME };
+enum ui_mode_t { UI_MODE_MENU, UI_MODE_GAME, UI_MODE_INPUT_TEST };
 static volatile ui_mode_t g_ui_mode_req = UI_MODE_MENU;
 static volatile ui_mode_t g_ui_mode_cur = UI_MODE_MENU;  // written by display_task
 static SemaphoreHandle_t  g_ui_mode_done = NULL;
 static bool g_trs_screen_inited = false;   // display_task-only
 static volatile bool g_z80_ready = false;  // z80_task subsystem inits done
+static bool g_touch_ok = false;            // Touch_Init() result, set at boot
 
 // Request a UI mode and block until display_task has applied it.
 static void ui_set_mode(ui_mode_t m) {
@@ -884,11 +889,46 @@ static void run_battery_screen() {
   drain_bt_events();
 }
 
+// Touch + button test screen (input_test.h). Every button is under test
+// there — A7 and ESC included — so a plain press can't mean "back": the
+// exit is HOLDING A7 (menu) or ESC for INPUT_TEST_EXIT_HOLD_MS. The grid
+// reads the MCP23017 directly; flow_task only watches the hub for the hold
+// (which also lets a BT keyboard's ESC leave when the buttons are dead).
+#define INPUT_TEST_EXIT_HOLD_MS 1000
+
+static void run_input_test() {
+  wait_z80_ready();  // z80_task's init_sound() feeds the button-press blip
+  ui_set_mode(UI_MODE_INPUT_TEST);
+  input_flush();
+
+  bool exit_held = false;
+  TickType_t held_since = 0;
+  while (true) {
+    // Reports only arrive on a state change, so a hold is "the last report
+    // had the key down" plus elapsed time — hence the short poll timeout.
+    BTKeyboard::KeyInfo inf;
+    if (input_wait_event(inf, pdMS_TO_TICKS(50))) {
+      const bool held = key_report_contains(inf, HID_MENU_BTN) ||
+                        key_report_contains(inf, HID_ESC);
+      if (held && !exit_held) held_since = xTaskGetTickCount();
+      exit_held = held;
+    }
+    if (exit_held && (xTaskGetTickCount() - held_since) >=
+                         pdMS_TO_TICKS(INPUT_TEST_EXIT_HOLD_MS)) {
+      break;
+    }
+  }
+
+  ui_set_mode(UI_MODE_MENU);
+  drain_bt_events();
+}
+
 static void run_settings_menu() {
   while (true) {
     static const char *items[] = { "Wi-Fi Setup", "Sync Games",
-                                   "TRS-80 Config", "Battery", "Back" };
-    int sel = run_menu_select("Settings", items, 5);
+                                   "TRS-80 Config", "Battery", "Input Test",
+                                   "Back" };
+    int sel = run_menu_select("Settings", items, 6);
     if (sel == 0) {
       run_wifi_interactive_setup();
       splash_hide_list();
@@ -898,6 +938,8 @@ static void run_settings_menu() {
       run_trs_config();
     } else if (sel == 3) {
       run_battery_screen();
+    } else if (sel == 4) {
+      run_input_test();
     } else {
       return;  // "Back", ESC or A7
     }
@@ -983,6 +1025,11 @@ static void display_task(void *arg)
           trs_screen.setVisible(true);
         }
         trs_screen.refresh();
+      } else if (g_ui_mode_req == UI_MODE_INPUT_TEST) {
+        input_test_show(g_touch_ok);
+      } else if (g_ui_mode_cur == UI_MODE_INPUT_TEST) {
+        // Back to the menu: deleting the overlay repaints the splash widgets.
+        input_test_hide();
       } else {
         // Hide the emulator canvas and give the display back to the menu UI
         // (rotated landscape). The splash widgets survived underneath the
@@ -997,9 +1044,9 @@ static void display_task(void *arg)
 
     if (g_ui_mode_cur == UI_MODE_GAME) {
       trs_screen.render();
-    } else {
+    } else if (g_ui_mode_cur == UI_MODE_MENU) {
       splash_tick();
-    }
+    }  // INPUT_TEST: driven entirely by LVGL timers/anims in lv_timer_handler
     osk_tick();  // on-screen keyboard: pending show/hide + touch polling
     lv_timer_handler();
     vTaskDelay(pdMS_TO_TICKS(5));
@@ -1070,16 +1117,10 @@ extern "C" void app_main(void)
   // Initialize LVGL
   LVGL_Init();
 
-#if CONFIG_TRASHBOY_INPUT_TEST_MODE
-  // Developer toggle: skip the whole BT / Wi-Fi / splash / RetroStore path
-  // and boot straight into the touch + button input test screen. Never
-  // returns (and does its own Touch_Init).
-  input_test_run();
-#endif
-
-  // GT911 touch for the on-screen keyboard. Non-fatal: without touch the
-  // OSK toggle is simply refused.
-  osk_set_touch_available(Touch_Init() == ESP_OK);
+  // GT911 touch for the on-screen keyboard and the input test screen.
+  // Non-fatal: without touch the OSK toggle is simply refused.
+  g_touch_ok = (Touch_Init() == ESP_OK);
+  osk_set_touch_available(g_touch_ok);
 
   splash_init();
   splash_set_statusbar("starting...");

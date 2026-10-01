@@ -119,6 +119,11 @@ this file is the working rules + hard-won gotchas.
   z80_reset, so games are relaunchable).
 - trs-lib settings UI (Settings -> TRS-80 Config, or F5 in-game) runs on
   the TRS screen with the Z80 kept paused.
+- Settings -> Input Test (touch fireworks + MCP23017 button grid + beep) is
+  a third UI mode, INPUT_TEST: an overlay on the menu (rot 270) built/torn
+  down by `input_test_show()/hide()` on `display_task`. Every button is
+  under test, so exit is **holding** A7 or ESC for 1 s. (It used to be a
+  boot-time Kconfig mode, `TRASHBOY_INPUT_TEST_MODE` — removed.)
 
 ## Games cache (offline play)
 
@@ -136,8 +141,6 @@ this file is the working rules + hard-won gotchas.
 
 - `TRASHBOY_BT_SCAN_ENABLED` (off while iterating without BT keyboard)
 - `TRASHBOY_WIFI_USE_PRESET` + SSID/password (dev-only; lives in sdkconfig)
-- `TRASHBOY_INPUT_TEST_MODE` (boot straight into touch+button+beep test
-  screen — also the minimal reproducer for display bring-up issues)
 - `TRASHBOY_SOUND_DIAG` (audio test tone + telemetry)
 
 ## Misc gotchas

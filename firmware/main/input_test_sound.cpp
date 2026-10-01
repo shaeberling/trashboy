@@ -19,11 +19,6 @@
 // +/-25 (speaker over-excursion protection), so 25 is exactly full volume.
 #define BEEP_AMPLITUDE   25.0f
 
-extern "C" void input_sound_init(void)
-{
-  init_sound();
-}
-
 extern "C" void input_sound_beep(void)
 {
   if (trsSamplesGenerator == NULL) {
