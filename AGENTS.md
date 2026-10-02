@@ -166,6 +166,11 @@ this file is the working rules + hard-won gotchas.
 - `TRASHBOY_BT_SCAN_ENABLED` (off while iterating without BT keyboard)
 - `TRASHBOY_WIFI_USE_PRESET` + SSID/password (dev-only; lives in sdkconfig)
 - `TRASHBOY_SOUND_DIAG` (audio test tone + telemetry)
+- `TRASHBOY_PERF_DIAG` (two `perf` log lines per second during a game:
+  `z80: speed=..% idle=..%` = emulated speed vs. real hardware and pacing
+  headroom; `disp: updates=.. chars=.. avg=..us` = screen updates and their
+  cost). **Measure with this before optimizing** — it is what showed the
+  display, not the Z80, was the bottleneck.
 
 ## Misc gotchas
 

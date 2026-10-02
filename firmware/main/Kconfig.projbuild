@@ -50,6 +50,24 @@ config TRASHBOY_SOUND_DIAG
       Leave disabled for normal use: the test tone would otherwise play
       over (and starve) real game audio, plus the per-second log is noise.
 
+config TRASHBOY_PERF_DIAG
+    bool "Enable emulator speed telemetry (per-second perf log)"
+    default n
+    help
+      When enabled, two "perf" log lines are printed once per second while
+      a game is running:
+
+        z80:  emulated speed as a percentage of real hardware, and how
+              much of the time the Z80 task spent idle in its pacing
+              delay. speed < 100% with idle near 0% means the emulator
+              itself cannot keep up.
+        disp: how many screen updates were pushed, their average / worst
+              cost in milliseconds, and the share of the display task's
+              time they took.
+
+      Use it to tell an emulation bottleneck from a display one before
+      optimizing either. Leave disabled for normal use.
+
 config TRASHBOY_BATTERY_DIVIDER_X1000
     int "Battery voltage divider factor (x1000)"
     default 3000

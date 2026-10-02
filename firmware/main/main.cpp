@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "bt_keyboard.hpp"
 #include "input.hpp"
@@ -1003,6 +1004,46 @@ void z80_task(void *arg)
   }
 }
 
+#if CONFIG_TRASHBOY_PERF_DIAG
+// Display-side half of the perf log (the Z80 half is in ptrs/trs.cpp).
+// Fed with every display_task iteration: its duration and how many
+// characters it redrew. An iteration that redrew something is an "update",
+// the rest are idle polls. Logs once per second while a game is on screen:
+// updates pushed, characters redrawn, average / worst update cost, and the
+// share of wall time spent on updates.
+static void perf_display_sample(int64_t dt_us, bool in_game, int redrawn) {
+  static int64_t win_start_us = 0, busy_us = 0, max_us = 0;
+  static int updates = 0, chars = 0;
+
+  if (!in_game) {
+    win_start_us = 0;
+    return;
+  }
+  const int64_t now = esp_timer_get_time();
+  if (win_start_us == 0) {
+    win_start_us = now;
+    busy_us = max_us = 0;
+    updates = chars = 0;
+    return;
+  }
+  if (redrawn > 0) {
+    updates++;
+    chars += redrawn;
+    busy_us += dt_us;
+    if (dt_us > max_us) max_us = dt_us;
+  }
+  const int64_t wall_us = now - win_start_us;
+  if (wall_us >= 1000000) {
+    ESP_LOGI("perf", "disp: updates=%d chars=%d avg=%dus max=%dus busy=%d%%",
+             updates, chars, updates ? (int) (busy_us / updates) : 0,
+             (int) max_us, (int) (busy_us * 100 / wall_us));
+    win_start_us = now;
+    busy_us = max_us = 0;
+    updates = chars = 0;
+  }
+}
+#endif
+
 // Owns ALL LVGL work forever: applies UI-mode transitions, ticks whichever
 // UI is active, and pumps lv_timer_handler. Keeping every LVGL call on this
 // one task (core 1) avoids the cross-core render races we fought earlier.
@@ -1048,13 +1089,23 @@ static void display_task(void *arg)
       xSemaphoreGive(g_ui_mode_done);
     }
 
+#if CONFIG_TRASHBOY_PERF_DIAG
+    const int64_t perf_t0 = esp_timer_get_time();
+#endif
+    int redrawn = 0;
     if (g_ui_mode_cur == UI_MODE_GAME) {
-      trs_screen.render();
+      redrawn = trs_screen.render();
     } else if (g_ui_mode_cur == UI_MODE_MENU) {
       splash_tick();
     }  // INPUT_TEST: driven entirely by LVGL timers/anims in lv_timer_handler
     osk_tick();  // on-screen keyboard: pending show/hide + touch polling
     lv_timer_handler();
+#if CONFIG_TRASHBOY_PERF_DIAG
+    perf_display_sample(esp_timer_get_time() - perf_t0,
+                        g_ui_mode_cur == UI_MODE_GAME, redrawn);
+#else
+    (void) redrawn;
+#endif
     // In a game, sleep a real tick (10 ms at CONFIG_FREERTOS_HZ=100): still
     // up to 100 passes/s, several per panel refresh, but the task no longer
     // spins re-taking the screen lock the Z80 needs for video-memory reads.

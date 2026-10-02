@@ -6,6 +6,8 @@
 #include "io.h"
 #include <freertos/task.h>
 #include <esp_timer.h>
+#include <esp_log.h>
+#include "sdkconfig.h"
 #include <unistd.h>
 #include <time.h>
 #include <sys/time.h>
@@ -86,6 +88,43 @@ static int64_t get_time_us()
   return esp_timer_get_time();
 }
 
+#if CONFIG_TRASHBOY_PERF_DIAG
+// Called once per timer slice (1/timer_hz of emulated time) with the time
+// the Z80 task just slept in the pacing delay. Logs once per second:
+//   speed = emulated time / wall time (100% = real hardware speed)
+//   idle  = share of wall time spent sleeping, i.e. the headroom
+// speed < 100% with idle ~0% means the emulator can't keep up.
+static void perf_z80_slice(int64_t slept_us)
+{
+  static int64_t win_start_us = 0, last_slice_us = 0, win_slept_us = 0;
+  static int slices = 0;
+
+  const int64_t now = get_time_us();
+  // First slice, or the Z80 was paused (menu): start a fresh window.
+  if (win_start_us == 0 || now - last_slice_us > 200000) {
+    win_start_us = now;
+    win_slept_us = 0;
+    slices = 0;
+  } else {
+    slices++;
+    win_slept_us += slept_us;
+  }
+  last_slice_us = now;
+
+  const int64_t wall_us = now - win_start_us;
+  if (wall_us >= 1000000) {
+    const int64_t emu_us = (int64_t) slices * 1000000LL / (int64_t) timer_hz;
+    ESP_LOGI("perf", "z80: speed=%d%% idle=%d%% (%d of %u slices)",
+             (int) (emu_us * 100 / wall_us),
+             (int) (win_slept_us * 100 / wall_us),
+             slices, (unsigned) (timer_hz * wall_us / 1000000));
+    win_start_us = now;
+    win_slept_us = 0;
+    slices = 0;
+  }
+}
+#endif
+
 static void sync_time_with_host()
 {
   int64_t curtime_us;
@@ -109,6 +148,9 @@ static void sync_time_with_host()
     //if ((count++ % 100) == 0) printf("DELAY us: %lld\n", (long long)wait_us);
   }
 
+#if CONFIG_TRASHBOY_PERF_DIAG
+  perf_z80_slice(get_time_us() - curtime_us);
+#endif
   curtime_us = get_time_us();
 
   lasttime_us = nexttime_us;
