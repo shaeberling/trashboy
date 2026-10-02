@@ -6,6 +6,8 @@
 
 #include <string.h>
 
+#include "buttons.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -38,22 +40,26 @@ static const char shift_trans_dict_[] =
 // boot report, which only ever uses keys[0..7]. Fixed slots also keep the
 // ASCII path's per-index "newly pressed" detection stable.
 //
-// The D-pad (bits 1-4) is double-assigned: pressing either column's
-// button produces the same key. Bits 5-6 are column-specific: column A
-// is CLEAR / SPACE, column B is Enter / Esc.
-enum BtnPort { PORT_A, PORT_B, PORT_AB };
-struct BtnMap { BtnPort port; uint8_t bit; uint8_t hid; uint8_t slot; };
+// The two D-pads are double-assigned: the left and the right one share a
+// key and a slot per direction, so pressing either produces the same key.
+// The action buttons differ per side: left is CLEAR / SPACE, right is
+// Enter / Esc. The shoulder buttons are not mapped.
+struct BtnMap { button_t button; uint8_t hid; uint8_t slot; };
 static const BtnMap BTN_MAP[] = {
-  { PORT_AB, 1, 0x52, 8 },   // A1/B1 -> Up
-  { PORT_AB, 2, 0x4F, 9 },   // A2/B2 -> Right
-  { PORT_AB, 3, 0x51, 10 },  // A3/B3 -> Down
-  { PORT_AB, 4, 0x50, 11 },  // A4/B4 -> Left
-  { PORT_A,  5, 0x4A, 12 },  // A5 -> CLEAR (HID Home; emulator maps to VK_HOME)
-  { PORT_B,  5, 0x28, 13 },  // B5 -> Enter
-  { PORT_A,  6, 0x2C, 14 },  // A6 -> Space
-  { PORT_B,  6, 0x29, 15 },  // B6 -> Esc
-  { PORT_B,  7, 0x4E, 16 },  // B7 -> OSK toggle (HID PageDown; see main.cpp)
-  { PORT_A,  7, 0x4B, 17 },  // A7 -> menu/home (HID PageUp; see main.cpp)
+  { BTN_L_DPAD_UP,      0x52, 8 },   // Up
+  { BTN_R_DPAD_UP,      0x52, 8 },
+  { BTN_L_DPAD_RIGHT,   0x4F, 9 },   // Right
+  { BTN_R_DPAD_RIGHT,   0x4F, 9 },
+  { BTN_L_DPAD_DOWN,    0x51, 10 },  // Down
+  { BTN_R_DPAD_DOWN,    0x51, 10 },
+  { BTN_L_DPAD_LEFT,    0x50, 11 },  // Left
+  { BTN_R_DPAD_LEFT,    0x50, 11 },
+  { BTN_L_ACTION_UPPER, 0x4A, 12 },  // CLEAR (HID Home; emulator maps to VK_HOME)
+  { BTN_R_ACTION_UPPER, 0x28, 13 },  // Enter
+  { BTN_L_ACTION_LOWER, 0x2C, 14 },  // Space
+  { BTN_R_ACTION_LOWER, 0x29, 15 },  // Esc
+  { BTN_OSK,            0x4E, 16 },  // OSK toggle (HID PageDown; see main.cpp)
+  { BTN_MENU,           0x4B, 17 },  // menu/home (HID PageUp; see main.cpp)
 };
 
 // Merged-report slot for the on-screen keyboard's single key.
@@ -132,17 +138,14 @@ void input_post_bt(const KeyInfo &report) {
 extern "C" void input_on_buttons(uint8_t port_a, uint8_t port_b) {
   if (s_lock == NULL) return;
 
-  // Pressed = grounded pin. One mask per column (bit set = that column's
-  // button is down).
-  const uint8_t pa = (uint8_t) ~port_a;
-  const uint8_t pb = (uint8_t) ~port_b;
+  // Pressed = grounded pin; fold both ports into one bit per button.
+  const uint16_t pressed = buttons_pressed(port_a, port_b);
 
   KeyInfo btn;
   memset(&btn, 0, sizeof(btn));
   for (unsigned i = 0; i < sizeof(BTN_MAP) / sizeof(BTN_MAP[0]); i++) {
     const BtnMap &m = BTN_MAP[i];
-    uint8_t src = (m.port == PORT_A) ? pa : (m.port == PORT_B) ? pb : (pa | pb);
-    if ((src >> m.bit) & 1) {
+    if (button_is_down(pressed, m.button)) {
       btn.keys[m.slot] = m.hid;
     }
   }

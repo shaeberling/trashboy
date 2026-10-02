@@ -47,6 +47,10 @@ this file is the working rules + hard-won gotchas.
   A3/B3=Down A4/B4=Left; A5=CLEAR (HID Home) A6=Space A7=**menu/home**
   (HID PageUp, kills a running game) B5=Enter B6=Esc B7=**on-screen
   keyboard toggle** (HID PageDown, in-game only). A0/B0 are unmapped.
+  The pins have names in `main/buttons.h` (`BTN_L_DPAD_UP`,
+  `BTN_R_ACTION_UPPER`, ...) — use those, not the numbers. Which keys each
+  game reads, and a suggested per-game button mapping, are in
+  `GAME_KEYS.md`.
 
 ## Display: the four hard rules
 
