@@ -459,15 +459,22 @@ static const uint8_t HID_RSHIFT = 0xE5;
 static const uint8_t HID_RALT = 0xE6;
 static const uint8_t HID_RGUI = 0xE7;
 
+// Each of the low 8 address bits selects one keyboard row; the real matrix
+// wire-ORs every selected row onto the data bus. Games rely on that: a
+// "press any key" check reads 0x38FF / 0x387F (all rows at once). Returning
+// only the lowest selected row made such reads see row 1 (@, A-G) alone, so
+// arrows / ENTER / SPACE / CLEAR — everything the board buttons send —
+// were invisible to them.
 int trs_kb_mem_read(int address)
 {
+  int data = 0;
   for (int i = 0; i < sizeof(keyb_buffer); i++) {
     if (address & 1) {
-      return keyb_buffer[i];
+      data |= keyb_buffer[i];
     }
     address >>= 1;
   }
-  return 0;
+  return data;
 }
 
 
