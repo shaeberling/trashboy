@@ -1099,12 +1099,23 @@ static void run_bt_menu() {
   g_bt_menu_open = false;
 }
 
+// Reboot the whole device (same as pressing the board's reset button). Wi-Fi
+// credentials, the paired keyboard and the games cache are all in flash and
+// survive it.
+static void run_restart() {
+  splash_set_status("Restarting...");
+  ESP_LOGI(TAG, "Restart requested from Settings");
+  vTaskDelay(pdMS_TO_TICKS(600));  // let the message reach the panel
+  esp_restart();
+}
+
 static void run_settings_menu() {
   while (true) {
     static const char *items[] = { "Wi-Fi Setup", "Sync Games",
                                    "Bluetooth Keyboard", "TRS-80 Config",
-                                   "Battery", "Input Test", "Back" };
-    int sel = run_menu_select("Settings", items, 7);
+                                   "Battery", "Input Test", "Restart",
+                                   "Back" };
+    int sel = run_menu_select("Settings", items, 8);
     if (sel == 0) {
       run_wifi_interactive_setup();
       splash_hide_list();
@@ -1118,6 +1129,8 @@ static void run_settings_menu() {
       run_battery_screen();
     } else if (sel == 5) {
       run_input_test();
+    } else if (sel == 6) {
+      run_restart();
     } else {
       return;  // "Back", ESC or A7
     }
