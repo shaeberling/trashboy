@@ -184,6 +184,18 @@ this file is the working rules + hard-won gotchas.
 
 ## Misc gotchas
 
+- **Games launch on a machine whose ROM never booted**: the launcher resets
+  the Z80, loads the CMD over zeroed RAM and jumps to its entry. Reading the
+  key matrix directly works; ROM services only work if the program sets up
+  the RAM tables itself. We also only have **Model III ROMs**, and some
+  programs install Model I ROM addresses: Rear Guard writes the Model I
+  keyboard driver (03E3H) into the keyboard DCB, which on the Model III ROM
+  returns "no key" forever. `redirect_model1_kbd_driver()` in `ptrs/trs.cpp`
+  sends that one case to the Model III driver (3024H). A game that ignores
+  keys at one prompt but not another is probably this class of problem —
+  check where the Z80 is executing before touching the input path. Booting
+  the ROM before loading does NOT help (the game overwrites the DCB) and
+  makes every launch seconds slower.
 - trs-io's `configure()` form has its OWN Wi-Fi credential store
   (`set_wifi_credentials` reboots the chip!) — unrelated to our
   wifi_manager NVS creds.

@@ -261,6 +261,39 @@ void z80_reset()
   z80ctx.ioWrite = z80_io_write;
 }
 
+// Keyboard device control block (same place in the Model I and III ROMs):
+// byte 0 = type, bytes 1-2 = driver address.
+#define KBD_DCB_DRIVER      0x4016
+#define M1_ROM_KBD_DRIVER   0x03E3   // keyboard driver in the Model I ROM
+#define M3_ROM_KBD_DRIVER   0x3024   // ... and in the Model III ROM
+
+// Programs that install the Model I ROM's keyboard driver on a Model III ROM.
+//
+// The ROM keyboard calls ($KBD 002BH / $KEY 0049H, same in both ROMs)
+// dispatch through the driver address in the keyboard DCB. Some programs
+// store the Model I ROM's driver address there themselves at start-up —
+// Rear Guard does, even in the copy RetroStore tags as Model III. We only
+// have Model III ROMs, where 03E3H is the tail of the printer driver: it
+// returns whatever was in A, i.e. "no key", so $KEY spins forever and the
+// program never sees a key press ("1 or 2 players" took no answer).
+//
+// When the dispatcher is about to enter that address, continue in the Model
+// III keyboard driver instead. The calling convention is the same.
+static inline void redirect_model1_kbd_driver()
+{
+  if (z80ctx.PC == M1_ROM_KBD_DRIVER &&
+      peek_mem(KBD_DCB_DRIVER) == (M1_ROM_KBD_DRIVER & 0xff) &&
+      peek_mem(KBD_DCB_DRIVER + 1) == (M1_ROM_KBD_DRIVER >> 8)) {
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      ESP_LOGI("trs", "program installed the Model I keyboard driver address; "
+               "redirecting to the Model III driver");
+    }
+    z80ctx.PC = M3_ROM_KBD_DRIVER;
+  }
+}
+
 void z80_run()
 {
   if (z80_paused) {
@@ -268,6 +301,8 @@ void z80_run()
     return;
   }
   static unsigned pace_tstates = 0;
+
+  redirect_model1_kbd_driver();
 
   unsigned last_tstate_count = z80ctx.tstates;
   Z80Execute(&z80ctx);
