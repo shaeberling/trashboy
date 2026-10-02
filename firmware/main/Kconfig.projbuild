@@ -1,18 +1,5 @@
 menu "Trashboy"
 
-config TRASHBOY_BT_SCAN_ENABLED
-    bool "Enable Bluetooth keyboard scanning on boot"
-    default y
-    help
-      When enabled (production default), the boot flow loops trying to
-      auto-connect a paired Bluetooth HID keyboard and falls back to
-      pairing-scan (devices_scan), then waits for the user to press ENTER
-      on the splash screen to continue.
-
-      Disable this for testing on hardware where no Bluetooth keyboard is
-      paired or present: boot will skip both the scan loop and the splash
-      ENTER-wait so it proceeds without user interaction.
-
 config TRASHBOY_WIFI_USE_PRESET
     bool "Use preset Wi-Fi credentials instead of the interactive dialog"
     default n

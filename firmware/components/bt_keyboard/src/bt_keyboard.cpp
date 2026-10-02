@@ -42,6 +42,25 @@
 
 SemaphoreHandle_t BTKeyboard::bt_hidh_cb_semaphore_  = nullptr;
 SemaphoreHandle_t BTKeyboard::ble_hidh_cb_semaphore_ = nullptr;
+SemaphoreHandle_t BTKeyboard::op_mutex_              = nullptr;
+esp_hidh_dev_t   *BTKeyboard::dev_                   = nullptr;
+
+namespace {
+// Holds BTKeyboard's operation mutex for the lifetime of the object.
+struct OpLock {
+  explicit OpLock(SemaphoreHandle_t m) : m_(m) {
+    if (m_ != nullptr) xSemaphoreTake(m_, portMAX_DELAY);
+  }
+  ~OpLock() {
+    if (m_ != nullptr) xSemaphoreGive(m_);
+  }
+  OpLock(const OpLock &)            = delete;
+  OpLock &operator=(const OpLock &) = delete;
+
+private:
+  SemaphoreHandle_t m_;
+};
+} // namespace
 
 const char *BTKeyboard::gap_bt_prop_type_names_[]    = {"", "BDNAME", "COD", "RSSI", "EIR"};
 
@@ -355,6 +374,12 @@ bool BTKeyboard::setup(PairingHandler        *pairing_handler,
     ESP_LOGE(TAG, "xSemaphoreCreateMutex failed!");
     vSemaphoreDelete(bt_hidh_cb_semaphore_);
     bt_hidh_cb_semaphore_ = nullptr;
+    return false;
+  }
+
+  op_mutex_ = xSemaphoreCreateMutex();
+  if (op_mutex_ == nullptr) {
+    ESP_LOGE(TAG, "xSemaphoreCreateMutex failed!");
     return false;
   }
 
@@ -1088,112 +1113,163 @@ auto BTKeyboard::retrieve_bonded_devices()
   return {bonded_devices, bonded_devices_count};
 }
 
-/**
- * @brief Scan for HID devices and attempt to connect to the first keyboard found
- *
- * This method scans for both Bluetooth Classic and BLE HID devices. For each device found,
- * it displays detailed information including:
- * - Transport type (BLE or BT Classic)
- * - Device address
- * - RSSI signal strength
- * - HID usage type
- * - For BLE: appearance value and address type
- * - For BT Classic: Class of Device (COD) information
- * - Device name (if available)
- *
- * The scan will automatically connect to the first device that matches either:
- * - For BLE: Has an appearance value matching ESP_BLE_APPEARANCE_HID_KEYBOARD
- * - For BT Classic: Has major class PERIPHERAL (5) and minor class includes keyboard
- *
- * @param seconds_wait_time Duration of the scan in seconds
- *
- * @note The method will return immediately if the keyboard is already connected
- */
-void BTKeyboard::devices_scan(int seconds_wait_time) {
-
-  if (connected_) return;
-
-  size_t     results_len = 0;
-  ScanResult results;
-  ESP_LOGD(TAG, "SCAN...");
-
-  // start scan for HID devices
-
-  esp_hid_scan(seconds_wait_time, &results_len, results);
-  ESP_LOGD(TAG, "SCAN: %u results", results_len);
-
-  if (results_len) {
-    esp_hid_scan_result_t *cr = nullptr;
-    for (auto &r : results) {
-      uint16_t appearance = r->ble.appearance;
-      std::cout << "  " << (r->transport == ESP_HID_TRANSPORT_BLE ? "BLE: " : "BT: ") << r->bda
-                << std::dec << ", RSSI: " << +r->rssi << ", USAGE: " << esp_hid_usage_str(r->usage);
-      if (r->transport == ESP_HID_TRANSPORT_BLE) {
-        std::cout << ", APPEARANCE: 0x" << std::hex << std::setw(4) << std::setfill('0')
-                  << appearance << ", ADDR_TYPE: '" << ble_addr_type_str(r->ble.addr_type) << "'";
-        if (appearance == ESP_BLE_APPEARANCE_HID_KEYBOARD) {
-          cr = r.get();
-        }
-      }
-      if (r->transport == ESP_HID_TRANSPORT_BT) {
-        std::cout << ", COD: " << esp_hid_cod_major_str(r->bt.cod.major) << "[";
-        esp_hid_cod_minor_print(r->bt.cod.minor, stdout);
-        std::cout << "] srv 0x" << std::hex << std::setw(3) << std::setfill('0')
-                  << r->bt.cod.service << ", " << r->bt.uuid;
-
-        if ((r->bt.cod.major == 5 /* PERIPHERAL */) &&
-            (r->bt.cod.minor & ESP_HID_COD_MIN_KEYBOARD)) {
-          cr = r.get();
-        }
-      }
-
-      std::cout << std::dec;
-
-      if (!r->name.empty()) {
-        std::cout << ", NAME: " << r->name << std::endl;
-      } else {
-        std::cout << std::endl;
-      }
-
-      if (cr) break;
-    }
-
-    if (cr) {
-      // open the selected entry
-      esp_hidh_dev_open(cr->bda, cr->transport, cr->ble.addr_type);
-    }
-
-    // free the results
-    results.clear();
-  }
+// BLE appearance values that can be a keyboard: an explicit keyboard, a
+// generic HID device (combo keyboards often say this), or none advertised.
+// Mice, gamepads etc. advertise their own appearance and are left out.
+static bool appearance_may_be_keyboard(uint16_t appearance) {
+  return appearance == ESP_BLE_APPEARANCE_HID_KEYBOARD ||
+         appearance == ESP_BLE_APPEARANCE_GENERIC_HID || appearance == 0;
 }
 
 /**
- * @brief Automatically connect to the first bonded keyboard device
+ * @brief Scan for BLE HID keyboards and report them, without connecting
  *
- * This method attempts to reconnect to a previously paired (bonded) keyboard device
- * on ESP restart. If successful, the device will be automatically connected without
- * requiring manual pairing again. If no bonded devices exist or auto-connect fails,
- * you should call devices_scan() to discover and pair a new device.
+ * Runs the HID scan (devices advertising the HID service, i.e. in pairing
+ * mode or looking for their host) and copies the ones that can be keyboards
+ * into `out`, strongest signal first. Which one to pair is the caller's
+ * (the user's) choice — see connect().
+ *
+ * @param out     Receives the keyboards found
+ * @param max     Capacity of `out`
+ * @param seconds Scan duration
+ * @return Number of entries written to `out`
  */
-void BTKeyboard::auto_connect_bonded_device() {
-  if (connected_) {
-    ESP_LOGD(TAG, "Already connected to a device");
-    return;
+int BTKeyboard::scan_keyboards(Keyboard *out, int max, int seconds) {
+  OpLock lock(op_mutex_);
+
+  // A previous scan that failed half-way may have left results behind;
+  // esp_hid_scan() refuses to start on top of them.
+  bt_scan_results_.clear();
+  ble_scan_results_.clear();
+  num_bt_scan_results_  = 0;
+  num_ble_scan_results_ = 0;
+
+  size_t     results_len = 0;
+  ScanResult results;
+  if (esp_hid_scan(seconds, &results_len, results) != ESP_OK) {
+    ESP_LOGE(TAG, "keyboard scan failed");
+    return 0;
   }
+
+  int count = 0;
+  for (auto &r : results) {
+    if (r->transport != ESP_HID_TRANSPORT_BLE) continue;
+    if (!appearance_may_be_keyboard(r->ble.appearance)) continue;
+
+    Keyboard k;
+    memcpy(k.bda, r->bda, sizeof(esp_bd_addr_t));
+    k.addr_type = r->ble.addr_type;
+    k.rssi      = r->rssi;
+    if (!r->name.empty()) {
+      snprintf(k.name, sizeof(k.name), "%s", r->name.c_str());
+    } else {
+      snprintf(k.name, sizeof(k.name), ESP_BD_ADDR_STR, ESP_BD_ADDR_HEX(r->bda));
+    }
+    ESP_LOGI(TAG, "scan: '%s' " ESP_BD_ADDR_STR " rssi %d appearance 0x%04x", k.name,
+             ESP_BD_ADDR_HEX(k.bda), k.rssi, r->ble.appearance);
+
+    // Insert sorted by signal strength, strongest first; drop the weakest
+    // once the caller's array is full.
+    int pos = count;
+    while (pos > 0 && out[pos - 1].rssi < k.rssi) pos--;
+    if (pos >= max) continue;
+    const int last = (count < max) ? count : max - 1;
+    for (int i = last; i > pos; i--) out[i] = out[i - 1];
+    out[pos] = k;
+    if (count < max) count++;
+  }
+  return count;
+}
+
+/**
+ * @brief Connect to a keyboard from scan_keyboards(), pairing if needed
+ *
+ * Opens the HID device. The stack pairs (bonds) as part of that when the
+ * keyboard asks for it; a keyboard that needs a passkey typed gets it
+ * through the PairingHandler given to setup(). An existing connection is
+ * dropped first.
+ *
+ * @return true once the keyboard is open
+ */
+bool BTKeyboard::connect(const Keyboard &kbd) {
+  OpLock lock(op_mutex_);
+  disconnect_locked();
+
+  esp_bd_addr_t bda;
+  memcpy(bda, kbd.bda, sizeof(esp_bd_addr_t));
+  ESP_LOGI(TAG, "connecting to '%s' " ESP_BD_ADDR_STR, kbd.name, ESP_BD_ADDR_HEX(bda));
+  return esp_hidh_dev_open(bda, ESP_HID_TRANSPORT_BLE, kbd.addr_type) != nullptr;
+}
+
+/**
+ * @brief Connect to the already-paired keyboard
+ *
+ * Reconnects to the first bonded device. This never pairs with anything
+ * new. Blocks until the keyboard answers or the BLE connection attempt
+ * times out, so a caller that keeps the keyboard connected can simply call
+ * this in a loop.
+ *
+ * @return true if the keyboard is (now) connected
+ */
+bool BTKeyboard::connect_paired() {
+  OpLock lock(op_mutex_);
+  if (connected_) return true;
 
   auto [dev_list, dev_count] = retrieve_bonded_devices();
-
   if (dev_count == 0) {
-    ESP_LOGD(TAG, "No bonded devices found. Please use devices_scan() to pair a keyboard.");
-    return;
+    ESP_LOGD(TAG, "No paired keyboard to connect to.");
+    return false;
   }
 
-  // Attempt to connect to the first bonded device
   esp_ble_bond_dev_t *first_device = dev_list.get();
-  //ESP_LOGI(TAG, "Auto-connecting to bonded device: " MACSTR, MAC2STR(first_device->bd_addr));
+  return esp_hidh_dev_open(first_device->bd_addr, ESP_HID_TRANSPORT_BLE,
+                           BLE_ADDR_TYPE_RPA_PUBLIC) != nullptr;
+}
 
-  esp_hidh_dev_open(first_device->bd_addr, ESP_HID_TRANSPORT_BLE, BLE_ADDR_TYPE_RPA_PUBLIC);
+// Close the open device, if any, and wait briefly for the close to land.
+// Caller holds op_mutex_.
+void BTKeyboard::disconnect_locked() {
+  if (dev_ == nullptr) return;
+  // esp_hidh_dev_close() checks that the handle is still a live device.
+  esp_hidh_dev_close(dev_);
+  for (int i = 0; i < 30 && connected_; i++) {
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
+
+void BTKeyboard::disconnect() {
+  OpLock lock(op_mutex_);
+  disconnect_locked();
+}
+
+void BTKeyboard::unpair_all() {
+  OpLock lock(op_mutex_);
+  disconnect_locked();
+  remove_all_bonded_devices();
+}
+
+int BTKeyboard::paired_count() {
+  if (bt_keyboard_ == nullptr) return 0; // setup() has not run
+  return esp_ble_get_bond_device_num();
+}
+
+void BTKeyboard::connected_name(char *out, size_t len) {
+  if (len == 0) return;
+  out[0] = '\0';
+  if (!connected_ || dev_ == nullptr) return;
+  const char *name = esp_hidh_dev_name_get(dev_);
+  if (name != nullptr) {
+    snprintf(out, len, "%s", name);
+  }
+}
+
+bool BTKeyboard::is_busy() {
+  // A mutex semaphore counts 1 while free, 0 while held.
+  return op_mutex_ != nullptr && uxSemaphoreGetCount(op_mutex_) == 0;
+}
+
+void BTKeyboard::wait_idle() {
+  OpLock lock(op_mutex_);
 }
 
 /**
@@ -1227,6 +1303,7 @@ void BTKeyboard::hidh_callback(void *handler_args, esp_event_base_t base, int32_
             ESP_LOGD(TAG, ESP_BD_ADDR_STR " OPEN: %s", ESP_BD_ADDR_HEX(bda),
                      esp_hidh_dev_name_get(param->open.dev));
             esp_hidh_dev_dump(param->open.dev, stdout);
+            dev_ = param->open.dev;
             bt_keyboard_->set_connected(true);
           }
         } else {
@@ -1271,6 +1348,10 @@ void BTKeyboard::hidh_callback(void *handler_args, esp_event_base_t base, int32_
     case ESP_HIDH_CLOSE_EVENT:
       {
         const uint8_t *bda = esp_hidh_dev_bda_get(param->close.dev);
+        // The HID host frees the device right after this event.
+        if (param->close.dev == dev_) {
+          dev_ = nullptr;
+        }
         if (bda) {
           ESP_LOGD(TAG, ESP_BD_ADDR_STR " CLOSE: %s", ESP_BD_ADDR_HEX(bda),
                    esp_hidh_dev_name_get(param->close.dev));

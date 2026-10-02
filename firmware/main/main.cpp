@@ -45,50 +45,46 @@ static constexpr char const *TAG = "Main";
 
 BTKeyboard bt_keyboard;
 
-static ScreenBuffer* origScreenBuffer = nullptr;
-static ScreenBuffer* backgroundBuffer = nullptr;
+// ---- Bluetooth keyboard: stack callbacks ------------------------------------
+//
+// These run on Bluetooth stack tasks, so they only log, set flags and hand
+// the splash a pending status string. The keyboard is managed from
+// Settings -> Bluetooth Keyboard (run_bt_menu); bt_task keeps the paired one
+// connected.
+
+static volatile bool g_bt_ready = false;      // bt_keyboard.setup() succeeded
+// bt_task reconnects to the paired keyboard while this is set. "Disconnect"
+// in Settings clears it, so the keyboard stays disconnected until the user
+// connects again (or the device restarts).
+static volatile bool g_bt_reconnect = true;
+// Settings -> Bluetooth Keyboard is open: bt_task starts no new attempts, so
+// the user's own scan / connect / unpair doesn't have to queue behind them.
+static volatile bool g_bt_menu_open = false;
+
+// Some keyboards pair with a passkey: we show a number, the user types it on
+// the keyboard followed by ENTER. Pairing only starts from the Settings
+// screen, so the menu's status line is where it belongs.
+static char g_bt_pairing_msg[64];
 
 void pairing_handler(uint32_t pid) {
-  window_t wnd;
-
-  z80_pause();
-  std::cout << "Please enter the following pairing code, " << std::endl
-            << "followed with ENTER on your keyboard: " << std::dec << pid << std::endl;
-  
-  if (origScreenBuffer == nullptr) {
-    origScreenBuffer = trs_screen.getTop();
-    backgroundBuffer = new ScreenBuffer(origScreenBuffer->getMode());
-    trs_screen.push(backgroundBuffer);
-    ScreenBuffer* screenBuffer = new ScreenBuffer(origScreenBuffer->getMode());
-    trs_screen.push(screenBuffer);
-    set_screen(screenBuffer->getBuffer(), backgroundBuffer->getBuffer(),
-	     screenBuffer->getWidth(), screenBuffer->getHeight());
-  }
-
-  set_screen_to_background();
-  init_window(&wnd, 0, 3, 0, 0);
-  header("Bluetooth Pairing");
-  wnd_print(&wnd, false, "\nPlease enter the following pairing code,\n");
-  wnd_print(&wnd, false, "followed with ENTER on your keyboard: ");
-  wnd_print_int32(&wnd, pid);
-  screen_show(false);
+  ESP_LOGI(TAG, "Bluetooth pairing code: %06u", (unsigned) pid);
+  snprintf(g_bt_pairing_msg, sizeof(g_bt_pairing_msg),
+           "Type %06u on the keyboard, then ENTER", (unsigned) pid);
+  splash_set_status(g_bt_pairing_msg);
 }
 
 void keyboard_lost_connection_handler() {
   ESP_LOGW(TAG, "====> Lost connection with keyboard <====");
+  // A key held at the moment the link drops never sends its release. Left
+  // alone it stays "down" in the input hub forever (and auto-repeats in the
+  // menus) — notably the ENTER that just chose "Disconnect".
+  BTKeyboard::KeyInfo released;
+  memset(&released, 0, sizeof(released));
+  input_post_bt(released);
 }
 
 void keyboard_connected_handler() {
   ESP_LOGI(TAG, "----> Connected to keyboard <----");
-  if (origScreenBuffer != nullptr) {
-    backgroundBuffer->copyBufferFrom(origScreenBuffer);
-    screen_show(true);
-    trs_screen.pop();
-    trs_screen.pop();
-    origScreenBuffer = nullptr;
-    backgroundBuffer = nullptr;
-    z80_resume();
-  }
 }
 
 static volatile bool do_z80_reset = false;
@@ -641,36 +637,31 @@ static void run_games_sync() {
 // BT and Wi-Fi both come up in the background; the main menu never blocks
 // on either. The board buttons work from the first frame.
 
+// Bring Bluetooth up, then keep the PAIRED keyboard connected: whenever it
+// is not connected, try to reach it. An attempt blocks until the keyboard
+// answers or the BLE connect times out, so a keyboard that wakes up (they
+// sleep when idle) is picked up again within seconds.
+//
+// This task never pairs with anything. Pairing is the user's choice in
+// Settings -> Bluetooth Keyboard; with no keyboard paired the radio stays
+// quiet.
 static void bt_task(void *arg) {
   (void) arg;
-  if (bt_keyboard.setup(pairing_handler, keyboard_connected_handler,
-                        keyboard_lost_connection_handler)) { // Must be called once
-#if CONFIG_TRASHBOY_BT_SCAN_ENABLED
-    // Try to auto-connect a previously paired keyboard; fall back to a
-    // pairing scan until something connects.
-    while (!bt_keyboard.is_connected()) {
-      bt_keyboard.auto_connect_bonded_device();
-      vTaskDelay(pdMS_TO_TICKS(2000));
-      if (!bt_keyboard.is_connected()) {
-        bt_keyboard.auto_connect_bonded_device();
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        if (!bt_keyboard.is_connected()) {
-          ESP_LOGI(TAG, "Scanning for keyboards to pair...");
-          bt_keyboard.devices_scan();  // default duration is 5 seconds
-          vTaskDelay(pdMS_TO_TICKS(5000));
-        }
-      }
-    }
-    ESP_LOGI(TAG, "----> BT keyboard ready <----");
-#else
-    // Developer toggle (CONFIG_TRASHBOY_BT_SCAN_ENABLED=n): one best-effort
-    // auto-connect attempt so a paired keyboard still works if present.
-    ESP_LOGW(TAG, "Bluetooth keyboard scanning disabled "
-                  "(CONFIG_TRASHBOY_BT_SCAN_ENABLED=n)");
-    bt_keyboard.auto_connect_bonded_device();
-#endif
+  if (!bt_keyboard.setup(pairing_handler, keyboard_connected_handler,
+                         keyboard_lost_connection_handler)) { // Must be called once
+    ESP_LOGE(TAG, "Bluetooth setup failed - no Bluetooth keyboard support");
+    vTaskDelete(NULL);
+    return;
   }
-  vTaskDelete(NULL);
+  g_bt_ready = true;
+
+  for (;;) {
+    if (g_bt_reconnect && !g_bt_menu_open && !bt_keyboard.is_connected() &&
+        bt_keyboard.paired_count() > 0) {
+      bt_keyboard.connect_paired();
+    }
+    vTaskDelay(pdMS_TO_TICKS(3000));
+  }
 }
 
 // Wi-Fi status-bar text. Ping-pong between two buffers so a snprintf into
@@ -926,22 +917,206 @@ static void run_input_test() {
   drain_bt_events();
 }
 
+// ---- Bluetooth keyboard (Settings) ------------------------------------------
+//
+// One keyboard at a time: pair it from a list of the keyboards currently in
+// pairing mode, connect / disconnect it, or unpair it to make room for
+// another. Nothing is ever paired automatically. bt_task (above) only keeps
+// the paired keyboard connected, and stands aside while this screen is open.
+
+#define BT_SCAN_SECONDS   5
+#define BT_MAX_KEYBOARDS  8   // + "Scan again" + "Back" = the 10 list rows
+
+// The Bluetooth stack remembers a pairing as keys + an address, not as a
+// name. Keep the name ourselves so "paired, not connected" can say which
+// keyboard it means.
+#define BT_NVS_NS    "bt_kbd"
+#define BT_NVS_NAME  "name"
+
+static bool bt_name_load(char *out, size_t len) {
+  nvs_handle_t h;
+  if (nvs_open(BT_NVS_NS, NVS_READONLY, &h) != ESP_OK) return false;
+  const esp_err_t err = nvs_get_str(h, BT_NVS_NAME, out, &len);
+  nvs_close(h);
+  return err == ESP_OK && out[0] != '\0';
+}
+
+static void bt_name_save(const char *name) {
+  nvs_handle_t h;
+  if (nvs_open(BT_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+  nvs_set_str(h, BT_NVS_NAME, name);
+  nvs_commit(h);
+  nvs_close(h);
+}
+
+static void bt_name_clear() {
+  nvs_handle_t h;
+  if (nvs_open(BT_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+  nvs_erase_key(h, BT_NVS_NAME);
+  nvs_commit(h);
+  nvs_close(h);
+}
+
+// Formatted text for the splash. Ping-pongs between two buffers so writing
+// the next message never tears the one the LVGL task is still applying.
+static const char *bt_text(const char *fmt, ...) {
+  static char buf[2][96];
+  static int idx = 0;
+  idx ^= 1;
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf[idx], sizeof(buf[0]), fmt, ap);
+  va_end(ap);
+  return buf[idx];
+}
+
+// What to call the keyboard: its name from the live connection, else the
+// name stored when it was paired.
+static void bt_keyboard_name(char *out, size_t len) {
+  bt_keyboard.connected_name(out, len);
+  if (out[0] == '\0' && !bt_name_load(out, len)) {
+    strlcpy(out, "Keyboard", len);
+  }
+}
+
+// A background reconnect attempt may still be waiting for the keyboard; our
+// own Bluetooth call would queue behind it without a word.
+static void bt_wait_idle() {
+  if (bt_keyboard.is_busy()) {
+    splash_set_status("Bluetooth is busy, one moment...");
+    bt_keyboard.wait_idle();
+  }
+}
+
+// Scan, let the user pick a keyboard, pair with it. Returns when a keyboard
+// has been paired or the user backs out.
+static void run_bt_pair() {
+  static BTKeyboard::Keyboard found[BT_MAX_KEYBOARDS];
+  while (true) {
+    splash_hide_list();
+    bt_wait_idle();
+    splash_set_status("Scanning - put the keyboard in pairing mode...");
+    const int n = bt_keyboard.scan_keyboards(found, BT_MAX_KEYBOARDS,
+                                             BT_SCAN_SECONDS);
+
+    const char *items[BT_MAX_KEYBOARDS + 2];
+    for (int i = 0; i < n; i++) items[i] = found[i].name;
+    items[n] = "Scan again";
+    items[n + 1] = "Back";
+    const int sel = run_menu_select(
+        n > 0 ? "Select the keyboard to pair:" : "No keyboards found",
+        items, n + 2);
+    if (sel < 0 || sel == n + 1) return;
+    if (sel == n) continue;
+
+    const BTKeyboard::Keyboard &kbd = found[sel];
+    // A keyboard that wants a passkey replaces this line with the code to
+    // type (see pairing_handler).
+    splash_set_status(bt_text("Pairing with %s...", kbd.name));
+    const bool ok = bt_keyboard.connect(kbd);
+    lcd_resync_after_flash_writes();  // the stack stored the pairing keys
+    if (ok) {
+      bt_name_save(kbd.name);
+      lcd_resync_after_flash_writes();
+      g_bt_reconnect = true;
+      ESP_LOGI(TAG, "Paired with Bluetooth keyboard '%s'", kbd.name);
+      splash_set_status(bt_text("Paired with %s", kbd.name));
+    } else {
+      ESP_LOGW(TAG, "Pairing with Bluetooth keyboard '%s' failed", kbd.name);
+      splash_set_status(bt_text("Could not pair with %s", kbd.name));
+    }
+    vTaskDelay(pdMS_TO_TICKS(1800));  // let the user read the result
+    if (ok) return;
+  }
+}
+
+static void run_bt_menu() {
+  if (!g_bt_ready) {
+    splash_set_status("Bluetooth is not available");
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    return;
+  }
+
+  enum bt_action_t { BT_CONNECT, BT_DISCONNECT, BT_UNPAIR, BT_PAIR, BT_BACK };
+
+  g_bt_menu_open = true;
+  while (true) {
+    const bool connected = bt_keyboard.is_connected();
+    const bool paired = bt_keyboard.paired_count() > 0;
+    char name[32];
+    bt_keyboard_name(name, sizeof(name));
+
+    const char *title;
+    const char *items[3];
+    bt_action_t actions[3];
+    int n = 0;
+    if (connected) {
+      title = bt_text("%s: connected", name);
+      items[n] = "Disconnect";       actions[n++] = BT_DISCONNECT;
+      items[n] = "Unpair";           actions[n++] = BT_UNPAIR;
+    } else if (paired) {
+      title = bt_text("%s: paired, not connected", name);
+      items[n] = "Connect";          actions[n++] = BT_CONNECT;
+      items[n] = "Unpair";           actions[n++] = BT_UNPAIR;
+    } else {
+      title = "No Bluetooth keyboard paired";
+      items[n] = "Pair a keyboard";  actions[n++] = BT_PAIR;
+    }
+    items[n] = "Back";               actions[n++] = BT_BACK;
+
+    const int sel = run_menu_select(title, items, n);
+    const bt_action_t action = (sel < 0) ? BT_BACK : actions[sel];
+    if (action == BT_BACK) break;
+
+    if (action == BT_PAIR) {
+      run_bt_pair();
+    } else if (action == BT_CONNECT) {
+      g_bt_reconnect = true;
+      bt_wait_idle();
+      splash_set_status(bt_text("Connecting to %s - press a key on it...", name));
+      const bool ok = bt_keyboard.connect_paired();
+      splash_set_status(ok ? bt_text("Connected to %s", name)
+                           : bt_text("%s did not answer", name));
+      vTaskDelay(pdMS_TO_TICKS(1800));
+    } else if (action == BT_DISCONNECT) {
+      // Stay disconnected: without this bt_task would reconnect right away.
+      g_bt_reconnect = false;
+      bt_wait_idle();
+      splash_set_status(bt_text("Disconnecting %s...", name));
+      bt_keyboard.disconnect();
+    } else if (action == BT_UNPAIR) {
+      bt_wait_idle();
+      splash_set_status(bt_text("Unpairing %s...", name));
+      bt_keyboard.unpair_all();
+      bt_name_clear();
+      lcd_resync_after_flash_writes();  // pairing keys + name removed from NVS
+      g_bt_reconnect = true;            // re-arm for whatever gets paired next
+      ESP_LOGI(TAG, "Bluetooth keyboard '%s' unpaired", name);
+      splash_set_status(bt_text("%s unpaired", name));
+      vTaskDelay(pdMS_TO_TICKS(1500));
+    }
+  }
+  g_bt_menu_open = false;
+}
+
 static void run_settings_menu() {
   while (true) {
     static const char *items[] = { "Wi-Fi Setup", "Sync Games",
-                                   "TRS-80 Config", "Battery", "Input Test",
-                                   "Back" };
-    int sel = run_menu_select("Settings", items, 6);
+                                   "Bluetooth Keyboard", "TRS-80 Config",
+                                   "Battery", "Input Test", "Back" };
+    int sel = run_menu_select("Settings", items, 7);
     if (sel == 0) {
       run_wifi_interactive_setup();
       splash_hide_list();
     } else if (sel == 1) {
       run_games_sync();
     } else if (sel == 2) {
-      run_trs_config();
+      run_bt_menu();
     } else if (sel == 3) {
-      run_battery_screen();
+      run_trs_config();
     } else if (sel == 4) {
+      run_battery_screen();
+    } else if (sel == 5) {
       run_input_test();
     } else {
       return;  // "Back", ESC or A7

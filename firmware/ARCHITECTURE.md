@@ -61,8 +61,8 @@ firmware/
 
 - Wraps **esp-hid** with both BT Classic and BLE host enabled (`CONFIG_BT_BLUEDROID_ENABLED`, `CONFIG_BT_BLE_ENABLED`).
 - Pairing data persists in NVS. Erase NVS to force re-pairing (commented-out line in `keyb_task`).
-- `setup(pairing_handler, connected_handler, lost_handler)` then loop: `auto_connect_bonded_device()` → if not connected after a couple of waits, `devices_scan()` (5 s) and try again.
-- Pairing UI (`pairing_handler` in `main.cpp:37`): pause Z80 → push a fresh ScreenBuffer overlay → render pairing prompt with `trs-lib` (`init_window`, `header`, `wnd_print`) → user types code on the keyboard → on connect, pop overlay buffers and resume Z80.
+- `setup(pairing_handler, connected_handler, lost_handler)`, then `bt_task` loops `connect_paired()` to keep the *paired* keyboard connected. It never pairs with anything new.
+- Pairing is explicit, from **Settings → Bluetooth Keyboard** (`run_bt_menu` in `main.cpp`): `scan_keyboards()` lists the BLE HID keyboards in pairing mode, the user picks one, `connect()` pairs with it. The same screen offers Connect / Disconnect / Unpair. A passkey, if the keyboard wants one, is shown on the menu's status line by `pairing_handler`.
 - Event loop pulls `KeyInfo` from a FreeRTOS queue with `wait_for_low_event()`. Special handling:
   - **F5** → pause Z80, `configure_pocket_trs()` (settings UI), resume.
   - **Ctrl+Alt+Del** → set `do_z80_reset` flag, picked up by `z80_task` to call `z80_reset()`.

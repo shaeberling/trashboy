@@ -18,6 +18,12 @@ CONFIG_BT_BLE_ENABLED=y
 CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
 CONFIG_BT_GATTC_NOTIF_REG_MAX=16
 CONFIG_BT_GATTC_NOTIF_REG_MAX=10
+# How long one BLE connection attempt waits for the keyboard (default 30 s).
+# An attempt cannot be cancelled, so this is also how long "Connect" in
+# Settings -> Bluetooth Keyboard blocks on a keyboard that is switched off,
+# and how long the user's own scan / unpair can queue behind a background
+# reconnect attempt. A keyboard that is awake answers within a second or two.
+CONFIG_BT_BLE_ESTAB_LINK_CONN_TOUT=10
 
 # -O2 instead of the default -Og: the Z80 interpreter is the hot loop and
 # -Og left it little headroom at Model III speed (see TRASHBOY_PERF_DIAG).

@@ -125,6 +125,33 @@ this file is the working rules + hard-won gotchas.
   state. Draining only the queue eats the release report and leaves
   key-repeat armed -> phantom ENTER self-selects item 0 on the next menu.
 
+## Bluetooth keyboard
+
+- BLE HID only (the ESP32-S3 has no Classic BT). One keyboard at a time,
+  managed from **Settings -> Bluetooth Keyboard**: scan lists the keyboards
+  in pairing mode, the user picks one to pair; Connect / Disconnect /
+  Unpair for the paired one. **Nothing pairs automatically** (the old
+  `TRASHBOY_BT_SCAN_ENABLED` boot scan that grabbed the first keyboard it
+  saw is gone).
+- `bt_task` only keeps the *paired* keyboard connected (retry loop). No
+  pairing -> no radio activity. `g_bt_reconnect` is cleared by "Disconnect"
+  so it stays disconnected; `g_bt_menu_open` pauses the loop while the
+  Settings screen is open.
+- `BTKeyboard::scan_keyboards / connect / connect_paired / disconnect /
+  unpair_all` all block and are serialized by one mutex. A BLE connection
+  attempt **cannot be cancelled** and blocks up to
+  `CONFIG_BT_BLE_ESTAB_LINK_CONN_TOUT` (set to 10 s) — that bounds both
+  "Connect" on a switched-off keyboard and how long a user action can wait
+  behind a background attempt (`is_busy()` / `wait_idle()`).
+- The stack stores a bond as keys + address, not a name: the paired
+  keyboard's name lives in our own NVS namespace `bt_kbd`.
+- Passkey pairing shows the code on the menu status line
+  (`pairing_handler`). BT callbacks run on stack tasks: only log, set flags,
+  `splash_set_status()`.
+- On a lost connection we post an all-released BT report to the input hub.
+  Without it a key held when the link drops (e.g. the ENTER that chose
+  "Disconnect") stays down forever and auto-repeats in the menus.
+
 ## Audio
 
 - SDM (sigma-delta) on GPIO 4 -> 2-pole RC (1k/10nF x2, ~16 kHz) -> PAM8302.
@@ -177,7 +204,6 @@ this file is the working rules + hard-won gotchas.
 
 ## Dev toggles (menuconfig -> Trashboy)
 
-- `TRASHBOY_BT_SCAN_ENABLED` (off while iterating without BT keyboard)
 - `TRASHBOY_WIFI_USE_PRESET` + SSID/password (dev-only; lives in sdkconfig)
 - `TRASHBOY_SOUND_DIAG` (audio test tone + telemetry)
 - `TRASHBOY_PERF_DIAG` (two `perf` log lines per second during a game:

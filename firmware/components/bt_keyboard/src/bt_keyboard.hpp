@@ -109,8 +109,55 @@ public:
   bool setup(PairingHandler        *pairing_handler         = nullptr,
              GotConnectionHandler  *got_connection_handler  = nullptr,
              LostConnectionHandler *lost_connection_handler = nullptr);
-  void        devices_scan(int seconds_wait_time = 5);
-  void        auto_connect_bonded_device();
+
+  // ---- Explicit keyboard management (driven by Settings -> Bluetooth) ----
+  //
+  // Nothing here pairs on its own initiative: a keyboard is only ever paired
+  // because the user picked it from a scan_keyboards() list. All of these
+  // block until done and are serialized against each other, so they can be
+  // called from any task (but not from a BT callback).
+
+  // A BLE HID keyboard seen advertising, i.e. one in pairing mode (or a
+  // paired one looking for its host).
+  struct Keyboard {
+    esp_bd_addr_t       bda;
+    esp_ble_addr_type_t addr_type;
+    int8_t              rssi;
+    char                name[32]; // advertised name, or the address if none
+  };
+
+  // Scan for `seconds` and fill `out` with up to `max` keyboards, strongest
+  // signal first. Returns how many were found.
+  int scan_keyboards(Keyboard *out, int max, int seconds = 5);
+
+  // Connect to a scanned keyboard, pairing (bonding) with it if needed. A
+  // keyboard that wants a passkey gets it via the PairingHandler. Returns
+  // true once the keyboard is open.
+  bool connect(const Keyboard &kbd);
+
+  // Connect to the already-paired keyboard. Blocks until it answers or the
+  // BLE connection attempt times out (CONFIG_BT_BLE_ESTAB_LINK_CONN_TOUT).
+  // Returns false if nothing is paired or it did not answer.
+  bool connect_paired();
+
+  // Drop the current connection; the pairing stays.
+  void disconnect();
+
+  // Disconnect and forget every paired keyboard.
+  void unpair_all();
+
+  // Number of paired (bonded) keyboards.
+  int paired_count();
+
+  // Copy the connected keyboard's name into `out` ("" if not connected or
+  // it has none).
+  void connected_name(char *out, size_t len);
+
+  // True while one of the calls above is in progress (e.g. a background
+  // connect_paired() waiting for the keyboard). wait_idle() blocks until
+  // that call has finished.
+  bool is_busy();
+  void wait_idle();
 
   inline uint8_t get_battery_level() { return battery_level_; }
   inline bool    is_connected() { return connected_; }
@@ -147,6 +194,14 @@ private:
 
   static SemaphoreHandle_t bt_hidh_cb_semaphore_;
   static SemaphoreHandle_t ble_hidh_cb_semaphore_;
+
+  // Serializes scan / connect / disconnect / unpair: the scan and open
+  // paths block on shared callback semaphores and cannot overlap.
+  static SemaphoreHandle_t op_mutex_;
+  // The open HID device (set / cleared from the HID host callback).
+  static esp_hidh_dev_t   *dev_;
+
+  void disconnect_locked();
 
   struct esp_hid_scan_result_t {
     esp_bd_addr_t       bda;
