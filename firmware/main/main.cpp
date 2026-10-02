@@ -1025,6 +1025,12 @@ static void display_task(void *arg)
           trs_screen.setVisible(true);
         }
         trs_screen.refresh();
+        // Paint the complete emulator picture through LVGL once, right now.
+        // From here on render() writes changed characters straight into the
+        // panel's frame buffer, which only works on top of a panel that
+        // already shows the canvas (and not the menu it just replaced).
+        trs_screen.render();
+        lv_refr_now(NULL);
       } else if (g_ui_mode_req == UI_MODE_INPUT_TEST) {
         input_test_show(g_touch_ok);
       } else if (g_ui_mode_cur == UI_MODE_INPUT_TEST) {
@@ -1049,7 +1055,13 @@ static void display_task(void *arg)
     }  // INPUT_TEST: driven entirely by LVGL timers/anims in lv_timer_handler
     osk_tick();  // on-screen keyboard: pending show/hide + touch polling
     lv_timer_handler();
-    vTaskDelay(pdMS_TO_TICKS(5));
+    // In a game, sleep a real tick (10 ms at CONFIG_FREERTOS_HZ=100): still
+    // up to 100 passes/s, several per panel refresh, but the task no longer
+    // spins re-taking the screen lock the Z80 needs for video-memory reads.
+    // Elsewhere keep the long-standing pdMS_TO_TICKS(5) — which is 0 ticks,
+    // i.e. just a yield — since the menu / input-test animations were tuned
+    // against that.
+    vTaskDelay(g_ui_mode_cur == UI_MODE_GAME ? 1 : pdMS_TO_TICKS(5));
   }
 }
 

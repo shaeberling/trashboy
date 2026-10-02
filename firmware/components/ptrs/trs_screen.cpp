@@ -2,6 +2,8 @@
 
 #include "trs_screen.h"
 #include "settings.h"
+#include "esp_lcd_panel_ops.h"
+#include "esp_lcd_panel_rgb.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -263,6 +265,10 @@ TRSScreen::TRSScreen()
   trsCanvas = nullptr;
   canvas = nullptr;
   canvas_buf = nullptr;
+  panel = nullptr;
+  panel_fb = nullptr;
+  overlayActive = false;
+  lvglRepaintPending = true;
   prevScreenBuffer = (uint8_t*) malloc(MAX_TRS_SCREEN_WIDTH * MAX_TRS_SCREEN_HEIGHT);
   memset(prevScreenBuffer, 0xFF, MAX_TRS_SCREEN_WIDTH * MAX_TRS_SCREEN_HEIGHT);
   mutex = xSemaphoreCreateRecursiveMutex();
@@ -287,6 +293,26 @@ void TRSScreen::init()
   lv_obj_clear_flag(canvas, LV_OBJ_FLAG_SCROLLABLE);
   createCanvas();
 #endif
+
+  // Direct-to-panel path for render(): grab the RGB panel's frame buffer.
+  // The canvas was just sized to the (unrotated) display, so both buffers
+  // share one geometry and a glyph lands at the same offset in either.
+  panel = (esp_lcd_panel_handle_t) lv_display_get_user_data(lv_display_get_default());
+  void *fb = nullptr;
+  if (panel != nullptr &&
+      canvasWidth == EXAMPLE_LCD_H_RES && canvasHeight == EXAMPLE_LCD_V_RES &&
+      esp_lcd_rgb_panel_get_frame_buffer(panel, 1, &fb) == ESP_OK) {
+    panel_fb = (lv_color16_t*) fb;
+  } else {
+    printf("TRSScreen: no panel frame buffer, rendering through LVGL only\n");
+  }
+  xSemaphoreGiveRecursive(mutex);
+}
+
+void TRSScreen::setOverlayActive(bool active)
+{
+  xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
+  overlayActive = active;
   xSemaphoreGiveRecursive(mutex);
 }
 
@@ -297,6 +323,7 @@ void TRSScreen::setVisible(bool visible)
     if (visible) {
       lv_obj_clear_flag(canvas, LV_OBJ_FLAG_HIDDEN);
       lv_obj_invalidate(canvas);
+      lvglRepaintPending = true;
     } else {
       lv_obj_add_flag(canvas, LV_OBJ_FLAG_HIDDEN);
     }
@@ -473,21 +500,41 @@ void TRSScreen::screenshot()
   xSemaphoreGiveRecursive(mutex);
 }
 
-void TRSScreen::render()
+// Two ways to get changed characters onto the panel:
+//
+//  - Direct (normal case): draw the glyph straight into the RGB panel's
+//    frame buffer. Cost scales with what changed. Going through LVGL instead
+//    cost ~127 ms per update no matter how little changed (whole canvas
+//    re-copied twice through PSRAM, measured with TRASHBOY_PERF_DIAG) and
+//    capped games at ~8 screen updates per second.
+//  - Through LVGL (while an overlay such as the on-screen keyboard is up):
+//    invalidate just the changed area so LVGL composites the overlay.
+//
+// Either way the glyph is also drawn into the LVGL canvas buffer, which
+// stays the complete, current picture. That is what makes the two paths
+// interchangeable: whenever LVGL does redraw (overlay shown/hidden, canvas
+// re-shown after the menu), it repaints exactly what is on the panel.
+int TRSScreen::render()
 {
   xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
-  if (top == nullptr) {
+  if (top == nullptr || trsCanvas == nullptr) {
     xSemaphoreGiveRecursive(mutex);
-    return;
+    return 0;
   }
 
-  // Track one combined dirty rectangle (in pixel coords) to minimize invalidate calls
-  bool any_dirty = false;
+  // Right after the canvas was (re)shown the panel still holds the menu and
+  // LVGL has the whole canvas queued for repaint: only update the canvas
+  // buffer in that pass and let LVGL bring the panel in line.
+  const bool direct = (panel_fb != nullptr) && !overlayActive && !lvglRepaintPending;
+  lvglRepaintPending = false;
+
+  // One combined dirty rectangle (native pixel coords) for everything
+  // redrawn in this pass.
+  int changed = 0;
+  lv_area_t dirty = {0, 0, 0, 0};
 
   uint8_t width = top->getWidth();
   uint8_t height = top->getHeight();
-  uint8_t char_width = top->getCharWidth();
-  uint8_t char_height = top->getCharHeight();
   uint8_t* buffer = top->getBuffer();
 
   for (int i = 0; i < width * height; i++) {
@@ -499,14 +546,40 @@ void TRSScreen::render()
     int cx = i % width;
     int cy = i / width;
 
-    trsCanvas->blit_glyph_to_canvas(newv, cx, cy);
-    any_dirty = true;
-  }
+    lv_area_t cell;
+    if (!trsCanvas->cell_area(cx, cy, &cell)) continue;
 
-  if (any_dirty) {
-    lv_obj_invalidate(canvas);
+    trsCanvas->blit_glyph(canvas_buf, newv, cx, cy);
+    if (direct) {
+      trsCanvas->blit_glyph(panel_fb, newv, cx, cy);
+    }
+
+    if (changed == 0) {
+      dirty = cell;
+    } else {
+      if (cell.x1 < dirty.x1) dirty.x1 = cell.x1;
+      if (cell.y1 < dirty.y1) dirty.y1 = cell.y1;
+      if (cell.x2 > dirty.x2) dirty.x2 = cell.x2;
+      if (cell.y2 > dirty.y2) dirty.y2 = cell.y2;
+    }
+    changed++;
   }
+  // Don't hold the lock for the flush below: the Z80 takes it on every
+  // video-memory read.
   xSemaphoreGiveRecursive(mutex);
+
+  if (changed > 0) {
+    if (direct) {
+      // The pixels are already in the frame buffer. Passing the frame buffer
+      // itself makes the driver skip its copy and only write the touched
+      // rows back from the CPU cache to PSRAM, where the panel's DMA reads.
+      esp_lcd_panel_draw_bitmap(panel, 0, dirty.y1, canvasWidth, dirty.y2 + 1,
+                                panel_fb);
+    } else {
+      lv_obj_invalidate_area(canvas, &dirty);
+    }
+  }
+  return changed;
 }
 
 void TRSScreen::blit_glyph_to_canvas(uint8_t ch, int cell_x, int cell_y)

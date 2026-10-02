@@ -21,6 +21,7 @@
 
 #include "Touch_Driver/Touch.h"
 #include "input.hpp"
+#include "trs_screen.h"
 
 // Authentic TRS-80 Model III glyphs: 256 chars x 12 row-bytes, bit 7 =
 // leftmost pixel. `const` at namespace scope has internal linkage in C++,
@@ -252,6 +253,9 @@ static void release_input_state(void) {
 static void apply_show(void) {
   if (!ensure_canvas()) return;
   s_visible = true;
+  // The emulator screen normally writes straight to the panel, which would
+  // paint over the keys: route it through LVGL while the overlay is up.
+  trs_screen.setOverlayActive(true);
   release_input_state();
   draw_all_keys();
   lv_obj_move_foreground(s_canvas);  // above the TRS canvas (created later)
@@ -267,6 +271,7 @@ static void apply_hide(void) {
   if (s_canvas != NULL) {
     lv_obj_add_flag(s_canvas, LV_OBJ_FLAG_HIDDEN);  // invalidates its area
   }
+  trs_screen.setOverlayActive(false);
   ESP_LOGI(TAG, "hidden");
 }
 

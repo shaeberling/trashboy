@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "freertos/FreeRTOS.h"
 #include <freertos/semphr.h>
+#include "esp_lcd_types.h"
 
 extern "C" {
 #include "LVGL_Driver.h"
@@ -116,48 +117,66 @@ private:
   }
 
 public:
-  inline void blit_glyph_to_canvas(uint8_t ch, int cell_x, int cell_y)
-  {
-    // After 90° CCW rotation:
-    // Original glyph: 8 wide × 12 tall
-    // Rendered as: 12 wide × 8 tall
-    // cell_x/cell_y refer to glyph cell positions in the rotated space
+  // The layout this canvas draws: a 64x16 text screen, centered. The pixel
+  // math below is only valid inside it.
+  static constexpr int TEXT_COLS = 64;
+  static constexpr int TEXT_ROWS = 16;
 
-    // Top-left pixel in screen space (in rotated coordinates)
-    int px0 = cell_x * font_width;  // rotated width = font_width (8)
-    int py0 = cell_y * font_height;   // rotated height = font_height (12)
-    
+  // Native-pixel rectangle covered by text cell (cell_x, cell_y).
+  //
+  // After 90° CCW rotation a glyph (8 wide × 12 tall) is rendered 12 wide ×
+  // 8 tall, and doubled along native x: 24 × 8 native pixels. Text columns
+  // run along native y (bottom to top), text rows along native x.
+  //
+  // Returns false for a cell outside the 64x16 layout: nothing may be drawn
+  // there, the math would run off the buffer.
+  inline bool cell_area(int cell_x, int cell_y, lv_area_t *area) const
+  {
+    if (cell_x < 0 || cell_x >= TEXT_COLS || cell_y < 0 || cell_y >= TEXT_ROWS) {
+      return false;
+    }
     const int offset_x = (canvas_width - (2 * 12 * 16)) / 2;
     const int offset_y = (canvas_height - (8 * 64)) / 2;
-  
-    lv_coord_t rotated_px = py0;
-    lv_coord_t rotated_py = canvas_height - 1 - px0;
-    px0 = rotated_px * 2 + offset_x;
-    py0 = rotated_py - offset_y;
+
+    area->x1 = cell_y * font_height * 2 + offset_x;
+    area->x2 = area->x1 + 2 * font_height - 1;
+    area->y2 = canvas_height - 1 - cell_x * font_width - offset_y;
+    area->y1 = area->y2 - (font_width - 1);
+    return true;
+  }
+
+  // Draw glyph `ch` at text cell (cell_x, cell_y) into `buf`, which must be
+  // a canvas_width × canvas_height RGB565 buffer (the canvas buffer, or the
+  // panel frame buffer — same geometry). Returns false if the cell is
+  // outside the layout and nothing was drawn.
+  inline bool blit_glyph(lv_color16_t *buf, uint8_t ch, int cell_x, int cell_y)
+  {
+    lv_area_t a;
+    if (!cell_area(cell_x, cell_y, &a)) {
+      return false;
+    }
 
     // For each column of the original glyph (becomes row in rotated space)
     // Original column 0 (leftmost) → rotated row 7 (bottom)
     // Original column 7 (rightmost) → rotated row 0 (top)
     for (int col = 0; col < font_width; col++) {
         uint16_t pat = glyph_bits(ch, col);
-        
-        // Write this column vertically in the rotated output
-        // Rotated row = (font_width - 1 - col)
-        const int rotated_row = font_width - 1 - col;
-        
+
         // Destination: start of the rotated row (which came from original column)
-        // These 12 pixels are contiguous in the canvas buffer
-        lv_color16_t *dst = canvas_buf + ((py0 - col /*+ rotated_row*/) * canvas_width + px0);
+        // These 2 x 12 pixels are contiguous in the buffer
+        lv_color16_t *dst = buf + ((a.y2 - col) * canvas_width + a.x1);
         lv_color16_t *pattern = col_lut[pat];
         for(int i = 0; i < font_height; i++) {
             *dst++ = *pattern;
             *dst++ = *pattern++;
         }
-
-        // Copy 12 contiguous pixels (the rotated row)
-        // col_lut[pat] is 12 lv_color16_t values
-        //ZZZZZ memcpy(dst, col_lut[pat], font_height * sizeof(lv_color16_t));
     }
+    return true;
+  }
+
+  inline void blit_glyph_to_canvas(uint8_t ch, int cell_x, int cell_y)
+  {
+    blit_glyph(canvas_buf, ch, cell_x, cell_y);
   }
 
 public:
@@ -187,10 +206,23 @@ private:
   uint8_t* prevScreenBuffer;
   TRSCanvas* trsCanvas;
   SemaphoreHandle_t mutex;
+  // Direct-to-panel path (see render()): the RGB panel's own frame buffer,
+  // null if it could not be obtained or doesn't match the canvas geometry.
+  esp_lcd_panel_handle_t panel;
+  lv_color16_t *panel_fb;
+  bool overlayActive;
+  // Set when the canvas was just (re)shown: LVGL is about to repaint all of
+  // it, so the next render() pass leaves the panel to LVGL.
+  bool lvglRepaintPending;
 
 public:
   TRSScreen();
   void init();
+  // Tell the screen that another LVGL object (the on-screen keyboard) is
+  // drawn on top of the canvas. While one is, render() must go through LVGL
+  // so the overlay gets composited; otherwise it writes the panel directly.
+  // Call from the LVGL-owning task only.
+  void setOverlayActive(bool active);
   // Show/hide the emulator's full-screen LVGL canvas. Used by the main-menu
   // flow: the menu (rotated LVGL UI) and the emulator never coexist, so
   // returning to the menu just hides the canvas instead of tearing it down.
@@ -213,7 +245,10 @@ public:
   void refresh();
   void screenshot();
   void blit_glyph_to_canvas(uint8_t ch, int cell_x, int cell_y);
-  void render();
+  // Push every character that changed since the last call to the display.
+  // Returns the number of characters redrawn (0 = nothing changed). Call
+  // from the LVGL-owning task only.
+  int render();
 };
 
 extern TRSScreen trs_screen;

@@ -69,6 +69,29 @@ this file is the working rules + hard-won gotchas.
    flickers constantly. Also: `CONFIG_SPI_FLASH_AUTO_SUSPEND` does nothing
    useful on this board's "generic" flash chip (tested; currently off).
 
+### Emulator screen: direct to the panel, not through LVGL
+
+- In GAME mode `TRSScreen::render()` draws changed glyphs **straight into
+  the RGB panel's frame buffer** (`esp_lcd_rgb_panel_get_frame_buffer`),
+  then calls `esp_lcd_panel_draw_bitmap()` with the frame buffer itself —
+  the driver then skips its copy and only syncs the touched rows from the
+  CPU cache to PSRAM. Cost ~0.25 ms per update. Going through LVGL
+  (`lv_obj_invalidate(canvas)`) cost ~127 ms per update *regardless of how
+  little changed* and capped games at ~8 screen updates/s.
+- Every glyph is also drawn into the LVGL canvas buffer, which stays the
+  complete picture. Whenever LVGL does repaint (overlay shown/hidden, canvas
+  re-shown after the menu) it reproduces what is on the panel, so the two
+  paths can be mixed freely.
+- Anything LVGL draws **on top of** the emulator canvas must call
+  `trs_screen.setOverlayActive(true)` while visible (the OSK does):
+  render() then goes through LVGL, invalidating only the changed area, so
+  the overlay is composited instead of being painted over.
+- Entering GAME mode does one `trs_screen.render()` + `lv_refr_now()` so the
+  panel shows the canvas before direct writes start.
+- `display_task` sleeps one real tick (10 ms) per pass in GAME mode. The old
+  `vTaskDelay(pdMS_TO_TICKS(5))` is **0 ticks at 100 Hz** — a spin — and is
+  kept only outside games, where the menu animations were tuned against it.
+
 ## Memory placement
 
 - Any buffer > ~16 KB must live in PSRAM

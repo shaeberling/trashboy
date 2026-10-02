@@ -130,7 +130,9 @@ lv_display_set_rotation(lv_display_get_default(), LV_DISPLAY_ROTATION_0);
 
 This way `trs_screen.init()` sees the native 480 / 640 resolution, allocates its canvas accordingly, and `TRSCanvas`'s manual rotation paints in the right place. The flush callback (see below) branches on `lv_display_get_rotation()` so this just works.
 
-Key file: `components/ptrs/trs_screen.h:119` (`blit_glyph_to_canvas`).
+Key file: `components/ptrs/trs_screen.h` (`TRSCanvas::blit_glyph`).
+
+**The emulator no longer reaches the panel through LVGL.** `TRSScreen::render()` blits each changed glyph into the LVGL canvas buffer *and* straight into the RGB panel's frame buffer, then asks the driver to sync just the touched rows (`esp_lcd_panel_draw_bitmap` with the frame buffer as source). LVGL only repaints the canvas on mode transitions or while an overlay (the on-screen keyboard) is up — see `setOverlayActive()`. The LVGL route cost ~127 ms per update no matter how little changed; the direct route costs ~0.25 ms. The "Adaptive flush callback" section below therefore describes the emulator's *fallback* path, not its hot path.
 
 ### Adaptive flush callback
 
