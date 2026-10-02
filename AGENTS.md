@@ -153,6 +153,11 @@ this file is the working rules + hard-won gotchas.
   down by `input_test_show()/hide()` on `display_task`. Every button is
   under test, so exit is **holding** A7 or ESC for 1 s. (It used to be a
   boot-time Kconfig mode, `TRASHBOY_INPUT_TEST_MODE` — removed.)
+- Emulator pacing (`ptrs/trs.cpp`): the Z80 runs one 10 ms slice of
+  emulated time per FreeRTOS tick, then sleeps (`PACE_HZ`, must not exceed
+  the tick rate). This is separate from the machine's 30/60 Hz timer
+  interrupt, which stays a pure function of emulated time. Games that time
+  themselves off that interrupt still update 30x/s, as on real hardware.
 
 ## Games cache (offline play)
 

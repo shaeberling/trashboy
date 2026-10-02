@@ -18,8 +18,24 @@
 #define CYCLES_PER_TIMER_M3 ((unsigned int) (CLOCK_MHZ_M3 * 1000000 / TIMER_HZ_M3))
 #define CYCLES_PER_TIMER_M4 ((unsigned int) (CLOCK_MHZ_M4 * 1000000 / TIMER_HZ_M4))
 
+// Pacing: the Z80 runs flat out for one "pace slice" of emulated time, then
+// sleeps until real time has caught up. The slice used to be the timer
+// interrupt period (1/30 s): with the emulator ~3x faster than real
+// hardware, that squeezed 33 ms of game activity into ~12 ms followed by
+// ~21 ms of nothing — on-screen motion came in clumps (at most 30 screen
+// updates/s) and a key press could wait 21 ms to be seen. Pacing is now
+// separate from the timer interrupt and as fine as the scheduler allows:
+// one slice per FreeRTOS tick. Going finer needs a faster tick.
+#define PACE_HZ 100
+#define PACE_US (1000000 / PACE_HZ)
+static_assert(PACE_HZ <= configTICK_RATE_HZ,
+              "a pace slice can't be shorter than one FreeRTOS tick");
+
+#define CYCLES_PER_PACE_M3 ((unsigned int) (CLOCK_MHZ_M3 * 1000000 / PACE_HZ))
+#define CYCLES_PER_PACE_M4 ((unsigned int) (CLOCK_MHZ_M4 * 1000000 / PACE_HZ))
+
 static unsigned int cycles_per_timer = CYCLES_PER_TIMER_M3;
-static unsigned int timer_hz = TIMER_HZ_M3;
+static unsigned int cycles_per_pace = CYCLES_PER_PACE_M3;
 
 
 int trs_model = 3;
@@ -30,8 +46,8 @@ static Z80Context z80ctx;
 void trs_timer_speed(int fast)
 {
   if (trs_model == 3) fast = 0;
-  timer_hz = fast ? TIMER_HZ_M4 : TIMER_HZ_M3;
   cycles_per_timer = fast ? CYCLES_PER_TIMER_M4 : CYCLES_PER_TIMER_M3;
+  cycles_per_pace = fast ? CYCLES_PER_PACE_M4 : CYCLES_PER_PACE_M3;
 }
 
 void poke_mem(uint16_t address, uint8_t data)
@@ -89,8 +105,8 @@ static int64_t get_time_us()
 }
 
 #if CONFIG_TRASHBOY_PERF_DIAG
-// Called once per timer slice (1/timer_hz of emulated time) with the time
-// the Z80 task just slept in the pacing delay. Logs once per second:
+// Called once per pace slice (PACE_US of emulated time) with the time the
+// Z80 task just slept in the pacing delay. Logs once per second:
 //   speed = emulated time / wall time (100% = real hardware speed)
 //   idle  = share of wall time spent sleeping, i.e. the headroom
 // speed < 100% with idle ~0% means the emulator can't keep up.
@@ -113,11 +129,11 @@ static void perf_z80_slice(int64_t slept_us)
 
   const int64_t wall_us = now - win_start_us;
   if (wall_us >= 1000000) {
-    const int64_t emu_us = (int64_t) slices * 1000000LL / (int64_t) timer_hz;
+    const int64_t emu_us = (int64_t) slices * PACE_US;
     ESP_LOGI("perf", "z80: speed=%d%% idle=%d%% (%d of %u slices)",
              (int) (emu_us * 100 / wall_us),
              (int) (win_slept_us * 100 / wall_us),
-             slices, (unsigned) (timer_hz * wall_us / 1000000));
+             slices, (unsigned) (wall_us / PACE_US));
     win_start_us = now;
     win_slept_us = 0;
     slices = 0;
@@ -129,9 +145,8 @@ static void sync_time_with_host()
 {
   int64_t curtime_us;
   int64_t nexttime_us;
-  const int64_t deltatime_us = 1000000LL / (int64_t) timer_hz;
+  const int64_t deltatime_us = PACE_US;
   static int64_t lasttime_us = 0;
-  static int count = 0;
 
   curtime_us = get_time_us();
   if (lasttime_us == 0) {
@@ -140,12 +155,19 @@ static void sync_time_with_host()
 
   nexttime_us = lasttime_us + deltatime_us;
   if (nexttime_us > curtime_us) {
-    int64_t wait_us = nexttime_us - curtime_us;
-    TickType_t wait_ticks = pdMS_TO_TICKS((wait_us + 999) / 1000);
+    // vTaskDelay() can only sleep to a tick boundary, so the wait is
+    // rounded to the NEAREST whole tick: a slice that finished 6.5 ms early
+    // sleeps to the next tick, which is where its slot ends once the loop
+    // has locked onto the tick. (Rounding down — the old pdMS_TO_TICKS —
+    // would make that 0 ticks: no sleep, and slices would bunch up in
+    // pairs.) Any error is carried in lasttime_us and corrected by the
+    // following slices, so emulated time still tracks real time exactly.
+    const int64_t tick_us = (int64_t) portTICK_PERIOD_MS * 1000;
+    const int64_t wait_us = nexttime_us - curtime_us;
+    const TickType_t wait_ticks = (TickType_t) ((wait_us + tick_us / 2) / tick_us);
     if (wait_ticks > 0) {
       vTaskDelay(wait_ticks);
     }
-    //if ((count++ % 100) == 0) printf("DELAY us: %lld\n", (long long)wait_us);
   }
 
 #if CONFIG_TRASHBOY_PERF_DIAG
@@ -245,13 +267,24 @@ void z80_run()
     vTaskDelay(pdMS_TO_TICKS(100));
     return;
   }
+  static unsigned pace_tstates = 0;
+
   unsigned last_tstate_count = z80ctx.tstates;
   Z80Execute(&z80ctx);
-  total_tstate_count += z80ctx.tstates - last_tstate_count;
+  const unsigned executed = z80ctx.tstates - last_tstate_count;
+  total_tstate_count += executed;
+
+  // The machine's timer interrupt: purely a matter of emulated time.
   while (z80ctx.tstates >= cycles_per_timer) {
-    sync_time_with_host();
     z80ctx.tstates -=  cycles_per_timer;
     z80ctx.int_req = 1;
+  }
+
+  // Pacing against real time, in slices much shorter than the timer period.
+  pace_tstates += executed;
+  while (pace_tstates >= cycles_per_pace) {
+    sync_time_with_host();
+    pace_tstates -= cycles_per_pace;
   }
 }
 
