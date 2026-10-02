@@ -263,10 +263,7 @@ static bool run_password_input(const char *ssid, char *out, size_t out_len) {
   while (true) {
     char ch = input_wait_ascii(true);
     if (ch == K_ENTER) {
-      if (out_len > 0) {
-        strncpy(out, buf, out_len - 1);
-        out[out_len - 1] = '\0';
-      }
+      strlcpy(out, buf, out_len);
       splash_set_subtext("");
       return true;
     } else if (ch == K_ESC || ch == K_MENU) {
@@ -284,8 +281,7 @@ static bool run_password_input(const char *ssid, char *out, size_t out_len) {
       // splash_set_subtext stores only the pointer until splash_tick reads
       // it. Make a static copy so the pointer remains valid.
       static char display[WIFI_MGR_PASS_LEN];
-      strncpy(display, buf, sizeof(display) - 1);
-      display[sizeof(display) - 1] = '\0';
+      strlcpy(display, buf, sizeof(display));
       splash_set_subtext(display);
     }
   }

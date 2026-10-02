@@ -18,6 +18,11 @@ this file is the working rules + hard-won gotchas.
 - `firmware/sdkconfig` contains **local dev secrets** (preset Wi-Fi
   password) and per-session toggles — do not commit it. Durable config
   choices go in `firmware/sdkconfig.defaults.esp32s3` with a comment.
+- The firmware builds at **-O2** (`CONFIG_COMPILER_OPTIMIZATION_PERF`, in
+  the defaults file). Defaults only seed a *new* sdkconfig: an existing
+  local `sdkconfig` still on `-Og` must be switched by hand (menuconfig ->
+  Compiler options). -O2 turns more warnings into errors than -Og, e.g.
+  `strncpy` truncation — use `strlcpy`.
 - Commit style: `firmware: <summary>` subject, body explains the why;
   don't commit `sdkconfig`, `.serial.log`, `scripts/serial-log*`.
 

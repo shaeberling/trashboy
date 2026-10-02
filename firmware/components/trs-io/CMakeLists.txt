@@ -43,6 +43,12 @@ idf_component_register(SRC_DIRS ${TRS_IO}/libsmb2/lib
                                 esp_driver_sdmmc
                                 esp_driver_sdspi)
 
+# The vendored retrostore-c-sdk hands a malloc()ed buffer to a
+# std::unique_ptr (retrostore.cpp, pb_MediaImageData_callback), which GCC
+# only notices once inlining kicks in at -O2. Keep it a warning here rather
+# than patching the submodule; the proper fix belongs upstream.
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-error=mismatched-new-delete)
+
 # Force static linking of modules
 set_property(TARGET ${COMPONENT_LIB} APPEND PROPERTY INTERFACE_LINK_LIBRARIES "-u theTrsIOCoreModule")
 set_property(TARGET ${COMPONENT_LIB} APPEND PROPERTY INTERFACE_LINK_LIBRARIES "-u init_frehd")
