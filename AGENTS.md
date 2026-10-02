@@ -40,7 +40,8 @@ this file is the working rules + hard-won gotchas.
 - Buttons (MCP23017, internal pull-ups, pressed = LOW, polled every 10 ms
   in one 2-byte read): D-pad double-assigned A1/B1=Up A2/B2=Right
   A3/B3=Down A4/B4=Left; A5=CLEAR (HID Home) A6=Space A7=**menu/home**
-  (HID PageUp, kills a running game) B5=Enter B6=Esc B7="1".
+  (HID PageUp, kills a running game) B5=Enter B6=Esc B7=**on-screen
+  keyboard toggle** (HID PageDown, in-game only). A0/B0 are unmapped.
 
 ## Display: the four hard rules
 
