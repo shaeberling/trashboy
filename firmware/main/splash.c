@@ -41,6 +41,14 @@ static const char *TAG = "splash";
 #define LIST_FONT              (&lv_font_montserrat_20)
 #define SUBTEXT_FONT           (&lv_font_montserrat_14)
 
+// Large list (splash_show_list_large): the main menu's handful of entries,
+// readable at arm's length. Rows are spaced for MS48 (~54 px line height);
+// between the status line and the subtext there is room for 4 of them.
+#define LIST_LARGE_FONT        (&lv_font_montserrat_48)
+#define LIST_LARGE_ROW_HEIGHT  64
+#define LIST_LARGE_TOP_GAP     14
+#define LIST_LARGE_MAX_ITEMS   4
+
 // Bottom system-status bar: white box, black lettering (contrast against
 // the black screen), full width.
 #define STATUSBAR_H            30
@@ -77,11 +85,21 @@ typedef enum { LIST_OP_NONE, LIST_OP_SHOW, LIST_OP_SEL, LIST_OP_HIDE } list_op_t
 static volatile list_op_t pending_list_op = LIST_OP_NONE;
 static int pending_list_count    = 0;
 static int pending_list_selected = 0;
+static bool pending_list_large   = false;
 static char pending_list_items[LIST_MAX_ITEMS][LIST_ITEM_TEXT_MAX];
 
 static lv_obj_t *list_labels[LIST_MAX_ITEMS] = {0};
 static int       list_count    = 0;
 static int       list_selected = 0;
+static bool      list_large    = false;
+
+// Top edge of list row `i` for the list currently shown.
+static int list_row_user_top(int i)
+{
+    return list_large
+        ? g_list_user_top + LIST_LARGE_TOP_GAP + i * LIST_LARGE_ROW_HEIGHT
+        : g_list_user_top + i * LIST_ROW_HEIGHT;
+}
 
 // -----------------------------------------------------------------------------
 
@@ -116,9 +134,7 @@ static void apply_layout(bool compact)
     }
     for (int i = 0; i < list_count; i++) {
         if (!list_labels[i]) continue;
-        lv_obj_set_pos(list_labels[i],
-                       TEXT_USER_LEFT,
-                       g_list_user_top + i * LIST_ROW_HEIGHT);
+        lv_obj_set_pos(list_labels[i], TEXT_USER_LEFT, list_row_user_top(i));
     }
 }
 
@@ -241,17 +257,30 @@ void splash_set_subtext_right(const char *text)
     pending_subtext_right = text ? text : "";
 }
 
-void splash_show_list(const char * const *items, int count, int selected)
+static void queue_list_show(const char * const *items, int count, int selected,
+                            bool large)
 {
-    if (count > LIST_MAX_ITEMS) count = LIST_MAX_ITEMS;
+    const int max = large ? LIST_LARGE_MAX_ITEMS : LIST_MAX_ITEMS;
+    if (count > max) count = max;
     pending_list_count = count;
     pending_list_selected = selected;
+    pending_list_large = large;
     for (int i = 0; i < count; i++) {
         const char *src = items[i] ? items[i] : "";
         strncpy(pending_list_items[i], src, LIST_ITEM_TEXT_MAX - 1);
         pending_list_items[i][LIST_ITEM_TEXT_MAX - 1] = '\0';
     }
     pending_list_op = LIST_OP_SHOW;
+}
+
+void splash_show_list(const char * const *items, int count, int selected)
+{
+    queue_list_show(items, count, selected, false);
+}
+
+void splash_show_list_large(const char * const *items, int count, int selected)
+{
+    queue_list_show(items, count, selected, true);
 }
 
 void splash_set_list_selection(int selected)
@@ -276,19 +305,21 @@ static void apply_list_show(void)
     }
     list_count = pending_list_count;
     list_selected = pending_list_selected;
+    list_large = pending_list_large;
 
-    ESP_LOGI(TAG, "apply_list_show: count=%d", list_count);
+    ESP_LOGI(TAG, "apply_list_show: count=%d%s", list_count,
+             list_large ? " (large)" : "");
     for (int i = 0; i < list_count; i++) {
         lv_obj_t *lbl = lv_label_create(splash_root);
         lv_label_set_text(lbl, pending_list_items[i]);
         lv_obj_set_style_text_color(lbl,
             i == list_selected ? lv_color_white() : lv_color_hex(0x808080), 0);
-        lv_obj_set_style_text_font(lbl, LIST_FONT, 0);
+        lv_obj_set_style_text_font(lbl,
+            list_large ? LIST_LARGE_FONT : LIST_FONT, 0);
         lv_obj_set_style_bg_opa(lbl, LV_OPA_TRANSP, 0);
         lv_obj_set_width(lbl, TEXT_WIDTH);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
-        lv_obj_set_pos(lbl, TEXT_USER_LEFT,
-                       g_list_user_top + i * LIST_ROW_HEIGHT);
+        lv_obj_set_pos(lbl, TEXT_USER_LEFT, list_row_user_top(i));
         list_labels[i] = lbl;
     }
 }

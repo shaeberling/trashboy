@@ -38,6 +38,11 @@ void splash_tick(void);
 // copied into the splash's internal buffer.
 void splash_show_list(const char * const *items, int count, int selected);
 
+// Same, in a much larger font: for the main menu, whose few short entries
+// should be readable at arm's length. At most 4 rows fit; longer lists and
+// longer texts belong in splash_show_list.
+void splash_show_list_large(const char * const *items, int count, int selected);
+
 // Update which row is highlighted in the currently shown list.
 void splash_set_list_selection(int selected);
 

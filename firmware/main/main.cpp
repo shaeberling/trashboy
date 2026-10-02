@@ -744,14 +744,20 @@ static void wifi_bg_task(void *arg) {
 
 // ---- Menu flows (flow_task is the single input consumer) -------------------
 
-// Show a list menu; returns the chosen index, or -1 on ESC / A7.
-static int run_menu_select(const char *title, const char * const *items, int n) {
+// Show a list menu; returns the chosen index, or -1 on ESC / A7. `large`
+// uses the big font (main menu; at most 4 short entries fit).
+static int run_menu_select(const char *title, const char * const *items, int n,
+                           bool large = false) {
   int sel = 0;
   // Kill any armed key-repeat from the keypress that got us here, so a
   // slowly-released ENTER can't phantom-select item 0.
   input_flush();
   splash_set_status(title);
-  splash_show_list(items, n, sel);
+  if (large) {
+    splash_show_list_large(items, n, sel);
+  } else {
+    splash_show_list(items, n, sel);
+  }
   while (true) {
     char ch = input_wait_ascii(true);
     if (ch == K_DOWN) {
@@ -954,7 +960,7 @@ static void flow_task(void *arg) {
     snprintf(games_item, sizeof(games_item), "Games (%d)",
              games_cache_count());
     const char *items[] = { games_item, "Settings" };
-    int sel = run_menu_select("Main Menu", items, 2);
+    int sel = run_menu_select("Main Menu", items, 2, true /* large */);
     if (sel == 0) {
       // Served from the offline cache — no Wi-Fi needed to browse or play.
       if (run_games_menu()) {

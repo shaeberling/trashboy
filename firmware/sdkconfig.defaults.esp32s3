@@ -23,9 +23,11 @@ CONFIG_BT_GATTC_NOTIF_REG_MAX=10
 # -Og left it little headroom at Model III speed (see TRASHBOY_PERF_DIAG).
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
-# Bigger LVGL fonts for splash UI (status @ 24 px, list/details @ 20 px)
+# Bigger LVGL fonts for splash UI (status @ 24 px, list/details @ 20 px,
+# main menu entries @ 48 px)
 CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_24=y
+CONFIG_LV_FONT_MONTSERRAT_48=y
 
 # NOTE: do NOT enable CONFIG_LCD_RGB_RESTART_IN_VSYNC here. It restarts the
 # LCD DMA on EVERY vsync (unconditionally — see lcd_rgb_panel_try_restart_
