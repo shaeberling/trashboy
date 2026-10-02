@@ -77,6 +77,7 @@ static int           s_pressed_key = -1;   // index into s_keys, -1 = none
 static bool          s_touching = false;
 static int           s_release_misses = 0; // debounce touch-up
 static TickType_t    s_last_poll = 0;
+static TickType_t    s_press_tick = 0;     // when s_pressed_key went down
 
 #define POLL_INTERVAL_MS   25
 #define RELEASE_MISSES     2   // consecutive empty polls to count as touch-up
@@ -299,11 +300,17 @@ static void poll_touch(void) {
           s_shift = !s_shift;
           input_post_osk(0, s_shift ? HID_LSHIFT_MODIFIER : 0);
           redraw_and_invalidate_key(idx);
+          ESP_LOGI(TAG, "shift %s", s_shift ? "latched" : "released");
         } else {
           s_pressed_key = idx;
+          s_press_tick = now;
           input_post_osk(k->hid, s_shift ? HID_LSHIFT_MODIFIER : 0);
           redraw_and_invalidate_key(idx);
+          ESP_LOGI(TAG, "key '%c' down (hid 0x%02x%s)", k->label, k->hid,
+                   s_shift ? ", shifted" : "");
         }
+      } else {
+        ESP_LOGI(TAG, "touch at user (%d,%d): no key there", ux, uy);
       }
     }
     // While held: key stays down (like a real keyboard); ignore drags.
@@ -316,6 +323,8 @@ static void poll_touch(void) {
     if (s_pressed_key >= 0) {
       const int idx = s_pressed_key;
       s_pressed_key = -1;
+      ESP_LOGI(TAG, "key '%c' up after %u ms", s_keys[idx].label,
+               (unsigned) ((now - s_press_tick) * portTICK_PERIOD_MS));
       // Key up; one-shot shift clears after a character.
       if (s_shift) {
         s_shift = false;

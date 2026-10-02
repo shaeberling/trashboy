@@ -465,8 +465,8 @@ static show_app_result_t show_cached_details(int index) {
         games_cache_load_cmd(index, buf, LAUNCH_CMD_MAX_BYTES, &size)) {
       g_launch_cmd_data = buf;
       g_launch_cmd_size = size;
-      ESP_LOGI(TAG, "Staged %u-byte cached CMD for '%s'",
-               (unsigned) size, g->name);
+      ESP_LOGI(TAG, "Staged %u-byte cached CMD for '%s' (model %d)",
+               (unsigned) size, g->name, (int) g->model);
       char msg[80];
       snprintf(msg, sizeof(msg), "Starting %s...", g->name);
       splash_set_status(msg);
