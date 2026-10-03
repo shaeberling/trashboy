@@ -21,6 +21,21 @@ config TRASHBOY_BOARD_SENSECAP_WATCHER
 
 endchoice
 
+config TRASHBOY_BT_AUTO_PAIR
+    bool "Pair the first Bluetooth keyboard found, automatically"
+    default n
+    help
+      Normally a Bluetooth keyboard is only paired from Settings ->
+      Bluetooth Keyboard, where the user picks it from a list. With this
+      enabled, whenever no keyboard is paired the board keeps scanning in
+      the background and pairs with the first keyboard it finds in pairing
+      mode (the strongest signal if there are several), with no input
+      needed.
+
+      For a board that has no way to drive the menus (no buttons, no
+      touch). Note that after "Unpair" in Settings the board will grab the
+      next keyboard in pairing mode again.
+
 config TRASHBOY_WIFI_USE_PRESET
     bool "Use preset Wi-Fi credentials instead of the interactive dialog"
     default n

@@ -62,16 +62,46 @@ static volatile bool g_bt_reconnect = true;
 static volatile bool g_bt_menu_open = false;
 
 // Some keyboards pair with a passkey: we show a number, the user types it on
-// the keyboard followed by ENTER. Pairing only starts from the Settings
-// screen, so the menu's status line is where it belongs.
+// the keyboard followed by ENTER. Pairing starts from the Settings screen
+// (or the auto-pair screen), so the menu's status line is where it belongs.
 static char g_bt_pairing_msg[64];
+// Set while a passkey is being shown; the auto-pair screen, which redraws
+// its status line continuously, shows g_bt_pairing_msg instead.
+static volatile bool g_bt_passkey_shown = false;
 
 void pairing_handler(uint32_t pid) {
   ESP_LOGI(TAG, "Bluetooth pairing code: %06u", (unsigned) pid);
   snprintf(g_bt_pairing_msg, sizeof(g_bt_pairing_msg),
            "Type %06u on the keyboard, then ENTER", (unsigned) pid);
+  g_bt_passkey_shown = true;
   splash_set_status(g_bt_pairing_msg);
 }
+
+#if CONFIG_TRASHBOY_BT_AUTO_PAIR
+// What bt_task's automatic pairing is doing, for the auto-pair screen
+// (run_bt_auto_pair_screen). Written by bt_task, read by flow_task, both
+// under g_bt_ap_lock.
+#define BT_AP_MAX_FOUND 8
+
+enum bt_ap_phase_t {
+  BT_AP_WAITING,    // between scans
+  BT_AP_SCANNING,
+  BT_AP_PAIRING,
+  BT_AP_PAIRED,
+  BT_AP_FAILED,
+};
+
+struct bt_ap_status_t {
+  bt_ap_phase_t phase;
+  int scans;                                   // scans completed
+  int found_count;                             // keyboards in the last scan
+  BTKeyboard::Keyboard found[BT_AP_MAX_FOUND]; // strongest first
+  char target[32];                             // keyboard being / last paired
+};
+
+static bt_ap_status_t g_bt_ap = {};
+static SemaphoreHandle_t g_bt_ap_lock = NULL;
+#endif
 
 void keyboard_lost_connection_handler() {
   ESP_LOGW(TAG, "====> Lost connection with keyboard <====");
@@ -637,14 +667,59 @@ static void run_games_sync() {
 // BT and Wi-Fi both come up in the background; the main menu never blocks
 // on either. The board buttons work from the first frame.
 
+static void bt_name_save(const char *name);
+
+#if CONFIG_TRASHBOY_BT_AUTO_PAIR
+// Nothing is paired: scan for keyboards in pairing mode and pair with the
+// first one found (scan_keyboards() sorts by signal strength). The scan
+// itself takes BT_AUTO_PAIR_SCAN_SECONDS.
+#define BT_AUTO_PAIR_SCAN_SECONDS 5
+
+static void bt_ap_set_phase(bt_ap_phase_t phase) {
+  xSemaphoreTake(g_bt_ap_lock, portMAX_DELAY);
+  g_bt_ap.phase = phase;
+  xSemaphoreGive(g_bt_ap_lock);
+}
+
+static void bt_auto_pair() {
+  static BTKeyboard::Keyboard found[BT_AP_MAX_FOUND];
+
+  bt_ap_set_phase(BT_AP_SCANNING);
+  const int n = bt_keyboard.scan_keyboards(found, BT_AP_MAX_FOUND,
+                                           BT_AUTO_PAIR_SCAN_SECONDS);
+  xSemaphoreTake(g_bt_ap_lock, portMAX_DELAY);
+  g_bt_ap.scans++;
+  g_bt_ap.found_count = n;
+  memcpy(g_bt_ap.found, found, sizeof(found[0]) * n);
+  g_bt_ap.phase = (n > 0) ? BT_AP_PAIRING : BT_AP_WAITING;
+  if (n > 0) strlcpy(g_bt_ap.target, found[0].name, sizeof(g_bt_ap.target));
+  xSemaphoreGive(g_bt_ap_lock);
+  if (n == 0) return;
+
+  const BTKeyboard::Keyboard &kbd = found[0];
+  ESP_LOGI(TAG, "Auto-pair: pairing with '%s'", kbd.name);
+  const bool ok = bt_keyboard.connect(kbd);
+  g_bt_passkey_shown = false;
+  if (ok) {
+    bt_name_save(kbd.name);
+    ESP_LOGI(TAG, "Auto-pair: paired with '%s'", kbd.name);
+  } else {
+    ESP_LOGW(TAG, "Auto-pair: pairing with '%s' failed", kbd.name);
+  }
+  lcd_resync_after_flash_writes();  // the stack stored the pairing keys
+  bt_ap_set_phase(ok ? BT_AP_PAIRED : BT_AP_FAILED);
+}
+#endif
+
 // Bring Bluetooth up, then keep the PAIRED keyboard connected: whenever it
 // is not connected, try to reach it. An attempt blocks until the keyboard
 // answers or the BLE connect times out, so a keyboard that wakes up (they
 // sleep when idle) is picked up again within seconds.
 //
-// This task never pairs with anything. Pairing is the user's choice in
-// Settings -> Bluetooth Keyboard; with no keyboard paired the radio stays
-// quiet.
+// Normally this task never pairs with anything: pairing is the user's
+// choice in Settings -> Bluetooth Keyboard, and with no keyboard paired the
+// radio stays quiet. With CONFIG_TRASHBOY_BT_AUTO_PAIR (boards that can't
+// drive the menus) it pairs the first keyboard it finds instead.
 static void bt_task(void *arg) {
   (void) arg;
   if (!bt_keyboard.setup(pairing_handler, keyboard_connected_handler,
@@ -655,10 +730,19 @@ static void bt_task(void *arg) {
   }
   g_bt_ready = true;
 
+#if CONFIG_TRASHBOY_BT_AUTO_PAIR
+  ESP_LOGI(TAG, "Bluetooth auto-pair enabled (CONFIG_TRASHBOY_BT_AUTO_PAIR)");
+#endif
   for (;;) {
-    if (g_bt_reconnect && !g_bt_menu_open && !bt_keyboard.is_connected() &&
-        bt_keyboard.paired_count() > 0) {
-      bt_keyboard.connect_paired();
+    if (g_bt_reconnect && !g_bt_menu_open && !bt_keyboard.is_connected()) {
+      if (bt_keyboard.paired_count() > 0) {
+        bt_keyboard.connect_paired();
+      }
+#if CONFIG_TRASHBOY_BT_AUTO_PAIR
+      else {
+        bt_auto_pair();
+      }
+#endif
     }
     vTaskDelay(pdMS_TO_TICKS(3000));
   }
@@ -1014,6 +1098,7 @@ static void run_bt_pair() {
     // type (see pairing_handler).
     splash_set_status(bt_text("Pairing with %s...", kbd.name));
     const bool ok = bt_keyboard.connect(kbd);
+    g_bt_passkey_shown = false;
     lcd_resync_after_flash_writes();  // the stack stored the pairing keys
     if (ok) {
       bt_name_save(kbd.name);
@@ -1137,9 +1222,122 @@ static void run_settings_menu() {
   }
 }
 
+#if CONFIG_TRASHBOY_BT_AUTO_PAIR
+// Boot screen for CONFIG_TRASHBOY_BT_AUTO_PAIR: shows what bt_task's
+// automatic pairing is doing (scanning, the keyboards found with their
+// signal strength, pairing, a passkey to type, the result) until the user
+// presses ENTER, then hands over to the main menu. Pairing carries on in
+// the background either way.
+static void run_bt_auto_pair_screen() {
+  static char status[2][96];
+  static int status_idx = 0;
+  char prev_status[96] = "";
+  char rows[BT_AP_MAX_FOUND][48];
+  char prev_rows[BT_AP_MAX_FOUND][48];
+  int prev_count = -1, prev_sel = -2;
+
+  // The paired keyboard's name, read once (NVS is flash; this loop polls).
+  char paired_name[32] = "";
+  bool paired_name_loaded = false;
+
+  input_flush();
+  splash_hide_list();
+  splash_set_subtext("ENTER: continue to the menu");
+
+  while (true) {
+    bt_ap_status_t ap;
+    xSemaphoreTake(g_bt_ap_lock, portMAX_DELAY);
+    ap = g_bt_ap;
+    xSemaphoreGive(g_bt_ap_lock);
+
+    // Status line.
+    char line[96];
+    const bool paired = g_bt_ready && bt_keyboard.paired_count() > 0;
+    if (paired && !paired_name_loaded) {
+      if (!bt_name_load(paired_name, sizeof(paired_name))) {
+        strlcpy(paired_name, ap.target[0] ? ap.target : "keyboard",
+                sizeof(paired_name));
+      }
+      paired_name_loaded = true;
+    }
+    if (!g_bt_ready) {
+      strlcpy(line, "Starting Bluetooth...", sizeof(line));
+    } else if (g_bt_passkey_shown) {
+      strlcpy(line, g_bt_pairing_msg, sizeof(line));
+    } else if (bt_keyboard.is_connected()) {
+      snprintf(line, sizeof(line), "Bluetooth: connected to %s", paired_name);
+    } else if (paired) {
+      snprintf(line, sizeof(line), "Bluetooth: paired with %s, connecting...",
+               paired_name);
+    } else if (ap.phase == BT_AP_PAIRING) {
+      snprintf(line, sizeof(line), "Bluetooth: pairing with %s...", ap.target);
+    } else if (ap.phase == BT_AP_FAILED) {
+      snprintf(line, sizeof(line), "Bluetooth: pairing with %s failed, retrying",
+               ap.target);
+    } else if (ap.phase == BT_AP_SCANNING) {
+      snprintf(line, sizeof(line),
+               "Bluetooth: scanning for keyboards in pairing mode (scan %d)",
+               ap.scans + 1);
+    } else {
+      strlcpy(line, "Bluetooth: put a keyboard in pairing mode", sizeof(line));
+    }
+    if (strcmp(line, prev_status) != 0) {
+      strlcpy(prev_status, line, sizeof(prev_status));
+      status_idx ^= 1;
+      strlcpy(status[status_idx], line, sizeof(status[0]));
+      splash_set_status(status[status_idx]);
+    }
+
+    // Keyboards seen in the last scan, the one being paired highlighted.
+    int sel = -1;
+    for (int i = 0; i < ap.found_count; i++) {
+      snprintf(rows[i], sizeof(rows[0]), "%s  (%d dBm)", ap.found[i].name,
+               ap.found[i].rssi);
+      if ((ap.phase == BT_AP_PAIRING || ap.phase == BT_AP_PAIRED ||
+           ap.phase == BT_AP_FAILED) && strcmp(ap.found[i].name, ap.target) == 0) {
+        sel = i;
+      }
+    }
+    bool rows_changed = ap.found_count != prev_count || sel != prev_sel;
+    for (int i = 0; !rows_changed && i < ap.found_count; i++) {
+      rows_changed = strcmp(rows[i], prev_rows[i]) != 0;
+    }
+    if (rows_changed) {
+      if (ap.found_count > 0) {
+        const char *items[BT_AP_MAX_FOUND];
+        for (int i = 0; i < ap.found_count; i++) items[i] = rows[i];
+        splash_show_list(items, ap.found_count, sel);
+      } else {
+        splash_hide_list();
+      }
+      for (int i = 0; i < ap.found_count; i++) {
+        strlcpy(prev_rows[i], rows[i], sizeof(prev_rows[0]));
+      }
+      prev_count = ap.found_count;
+      prev_sel = sel;
+    }
+
+    // ENTER (board button or a keyboard) leaves; poll the status again
+    // every 200 ms otherwise.
+    BTKeyboard::KeyInfo inf;
+    if (input_wait_event(inf, pdMS_TO_TICKS(200)) &&
+        key_report_contains(inf, HID_ENTER)) {
+      break;
+    }
+  }
+
+  splash_hide_list();
+  splash_set_subtext("");
+  drain_bt_events();
+}
+#endif
+
 static void flow_task(void *arg) {
   (void) arg;
   splash_set_compact();
+#if CONFIG_TRASHBOY_BT_AUTO_PAIR
+  run_bt_auto_pair_screen();
+#endif
   // NOTE: games_cache_mount() happens in app_main BEFORE LCD_Init — flash
   // work during early panel streaming kills the RGB DMA (see app_main).
   while (true) {
@@ -1393,6 +1591,9 @@ extern "C" void app_main(void)
   splash_init();
   splash_set_statusbar("starting...");
   g_ui_mode_done = xSemaphoreCreateBinary();
+#if CONFIG_TRASHBOY_BT_AUTO_PAIR
+  g_bt_ap_lock = xSemaphoreCreateMutex();
+#endif
 
   // display_task owns all LVGL work (8 KB stack: the render pipeline
   // recurses deep enough to overflow 4 KB). flow_task drives the menus and

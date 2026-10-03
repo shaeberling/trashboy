@@ -159,9 +159,10 @@ restarted stream is as fragile as a freshly booted one.
 - BLE HID only (the ESP32-S3 has no Classic BT). One keyboard at a time,
   managed from **Settings -> Bluetooth Keyboard**: scan lists the keyboards
   in pairing mode, the user picks one to pair; Connect / Disconnect /
-  Unpair for the paired one. **Nothing pairs automatically** (the old
-  `TRASHBOY_BT_SCAN_ENABLED` boot scan that grabbed the first keyboard it
-  saw is gone).
+  Unpair for the paired one. **Nothing pairs automatically** unless
+  `TRASHBOY_BT_AUTO_PAIR` is set (default off; for boards that can't drive
+  the menus): then, while nothing is paired, `bt_task` scans and pairs the
+  first keyboard it finds in pairing mode.
 - `bt_task` only keeps the *paired* keyboard connected (retry loop). No
   pairing -> no radio activity. `g_bt_reconnect` is cleared by "Disconnect"
   so it stays disconnected; `g_bt_menu_open` pauses the loop while the
@@ -284,6 +285,7 @@ constants in `watcher_main.cpp` are first guesses that have not been tuned.
 
 ## Dev toggles (menuconfig -> Trashboy)
 
+- `TRASHBOY_BT_AUTO_PAIR` (pair the first BT keyboard found, no input needed)
 - `TRASHBOY_WIFI_USE_PRESET` + SSID/password (dev-only; lives in sdkconfig)
 - `TRASHBOY_SOUND_DIAG` (audio test tone + telemetry)
 - `TRASHBOY_PERF_DIAG` (two `perf` log lines per second during a game:
