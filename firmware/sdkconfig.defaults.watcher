@@ -1,0 +1,27 @@
+# Seeed SenseCAP Watcher (experimental). Load after sdkconfig.defaults:
+#   -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.watcher"
+# scripts/watcher.sh does that, with its own build directory and sdkconfig.
+# The chip is the same ESP32-S3R8 as the Waveshare board's (8 MB octal PSRAM),
+# so sdkconfig.defaults.esp32s3 applies unchanged.
+CONFIG_TRASHBOY_BOARD_SENSECAP_WATCHER=y
+
+# 32 MB flash.
+CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
+
+# Keeps clear of Seeed's factory data; see the file.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_watcher.csv"
+
+# The Z80 runs on the main task, as on the Waveshare board (whose local
+# sdkconfig has the same value).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8000
+
+# The rest is not about the Watcher. sdkconfig.defaults does not carry
+# everything the Waveshare build's local sdkconfig has, and a sdkconfig made
+# from the defaults alone does not build (trs-lib trips -Werror). These are
+# the values of that local sdkconfig, so both boards run the emulator on the
+# same configuration.
+CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS=y
+CONFIG_COMPILER_ORPHAN_SECTIONS_WARNING=y
+CONFIG_LIBC_NEWLIB=y
+CONFIG_FREERTOS_IN_IRAM=y
+# CONFIG_ESP_TASK_WDT_EN is not set

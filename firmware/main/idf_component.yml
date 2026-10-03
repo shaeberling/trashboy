@@ -1,3 +1,6 @@
 dependencies:
   idf: ">=4.4"
   lvgl/lvgl: "~9.1"
+  # SenseCAP Watcher display (TRASHBOY_BOARD_SENSECAP_WATCHER). Listed for
+  # both boards so they share one dependencies.lock and managed_components/.
+  espressif/esp_lcd_spd2010: "^2.0.0"

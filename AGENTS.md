@@ -232,6 +232,56 @@ restarted stream is as fragile as a freshly booted one.
   works fully offline; launch reads the CMD from flash into the PSRAM
   launch buffer.
 
+## Second board: Seeed SenseCAP Watcher (experimental)
+
+Round 412x412 SPD2010 LCD on QSPI, a wheel (rotary encoder + push button),
+ESP32-S3 with 8 MB octal PSRAM and 32 MB flash. Selected by
+`CONFIG_TRASHBOY_BOARD_SENSECAP_WATCHER` (menuconfig -> Trashboy -> Board);
+`main/CMakeLists.txt` then compiles `main/watcher/` **instead of** everything
+else in `main/`. The components are shared and unchanged.
+
+**Status 2026-10-03: runs on the device** (Sascha: "it works"). The wheel
+constants in `watcher_main.cpp` are first guesses that have not been tuned.
+
+- No menus, radios, sound or touch. It boots straight into Breakdown, which
+  is embedded in the app image. The game file (`main/watcher/breakdown.cmd`)
+  is gitignored: `scripts/watcher.sh build` downloads it from RetroStore when
+  it is missing (`scripts/fetch_retrostore_cmd.py`). Wheel left/right = LEFT/RIGHT arrow,
+  press = SPACE, hold 2 s = restart the game.
+- Build and flash with `scripts/watcher.sh build|backup|flash`. It uses its
+  own `build-watcher/` and `build-watcher/sdkconfig`, seeded from
+  `sdkconfig.defaults` + `sdkconfig.defaults.watcher`; the Waveshare
+  `sdkconfig` is not involved. After editing the defaults, delete
+  `build-watcher/sdkconfig` — defaults only seed a new one.
+- **`sdkconfig.defaults` alone does not build the project**: the Waveshare
+  `sdkconfig` carries values the defaults lack (`COMPILER_DISABLE_DEFAULT_ERRORS`
+  for trs-lib, newlib instead of picolibc, task watchdog off, ...). The
+  Watcher overlay repeats them.
+- **Never flash it with plain esptool / `idf.py flash`.** Its USB bridge
+  (CH342, two ports; the S3 is the one ending in `3` on macOS) drops bytes on
+  full-size packets: the flash fails after the bootloader has been erased.
+  Flash through `scripts/paced_esptool.py` (115200 baud, 64-byte writes); a
+  failed flash is recovered by flashing again with it. (All of this is from
+  muse-gadget-sdk's notes on the board, where the script comes from.)
+- Seeed's per-device factory data sits in flash at 0x9000-0x3B000
+  (`nvsfactory`). `partitions_watcher.csv` declares it so nothing lands on
+  it, and a flash writes only 0x0-0x9000 and the app at 0x50000. Don't move
+  the partition table from 0x8000 or shrink that partition.
+- Display (`watcher_board.c`, `watcher_screen.cpp`): no LVGL. The 64x16
+  screen is drawn at 6x9 pixels per cell (384x144, the largest 8:3 rectangle
+  in the circle) into an internal-RAM frame buffer, and changed text rows are
+  sent with `esp_lcd_panel_draw_bitmap`. SPD2010 windows must start and end
+  on 4-pixel columns. Set up the panel's SPI bus on the task that draws
+  (pinned): the driver's bus lock can strand a sender whose transfer-done
+  interrupt runs on the other core.
+- Breakdown reads the keys once per ~35 ms game tick and moves the paddle a
+  column per tick, so a wheel step is turned into a key held for
+  `WHEEL_STEP_HOLD_MS` (see `watcher_main.cpp`). It never uses sound or any
+  output port.
+- `trs_screen.init()`, `init_settings()`, `init_trs_io()`, `init_sound()` are
+  NOT called on this board (LVGL, NVS, SDM on GPIO 4 — a camera pin here).
+  A game that needs trs-io, FreHD or sound needs more than a new CMD file.
+
 ## Dev toggles (menuconfig -> Trashboy)
 
 - `TRASHBOY_WIFI_USE_PRESET` + SSID/password (dev-only; lives in sdkconfig)

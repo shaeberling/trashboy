@@ -1,5 +1,26 @@
 menu "Trashboy"
 
+choice TRASHBOY_BOARD
+    prompt "Board"
+    default TRASHBOY_BOARD_WAVESHARE_28B
+    help
+      The hardware this firmware is built for. Each board has its own
+      sources in main/ (see main/CMakeLists.txt); the emulator core is
+      shared.
+
+config TRASHBOY_BOARD_WAVESHARE_28B
+    bool "Waveshare ESP32-S3-Touch-LCD-2.8B + TrashBoy carrier"
+
+config TRASHBOY_BOARD_SENSECAP_WATCHER
+    bool "Seeed SenseCAP Watcher (experimental)"
+    help
+      Round 412x412 display, a wheel with a push button, no menus: boots
+      straight into Breakdown. Build it in its own directory with
+      scripts/watcher.sh, which adds sdkconfig.defaults.watcher (32 MB
+      flash, a partition table that leaves Seeed's factory data alone).
+
+endchoice
+
 config TRASHBOY_WIFI_USE_PRESET
     bool "Use preset Wi-Fi credentials instead of the interactive dialog"
     default n

@@ -6,3 +6,8 @@ tags
 *.tar
 .serial.log*
 .serial-logger.pid
+# SenseCAP Watcher: its build directory, flash backups, and the game its
+# image carries (scripts/watcher.sh build downloads it)
+build-watcher/
+watcher-backup/
+main/watcher/breakdown.cmd
