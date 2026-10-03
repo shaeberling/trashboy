@@ -250,6 +250,38 @@ restarted stream is as fragile as a freshly booted one.
 - `init_io()` (FreHD state init) was never called before this; z80_task
   now calls it, then `flash_disk_mount()`.
 
+## TRS-IO (submodule, upstream master)
+
+- `components/trs-io/TRS-IO` is apuder/TRS-IO, branch `trashboy`:
+  upstream `master` with our commits on top (Arno's forks of libsmb2 and
+  retrostore-c-sdk, IDF v6 fixes, `init_trs_fs_local()`). Keep TrashBoy
+  changes there, never on `master`: PocketTRS and TRS-IO's boards build
+  `master` on an older IDF. To update, rebase `trashboy` onto
+  `origin/master` and force-push it (with `--force-with-lease`).
+  Upstream is the firmware for TRS-IO's own boards (FPGA over SPI, LEDs,
+  PS/2 keyboard): its `src/esp/main` is not built. The wrapper
+  `components/trs-io/CMakeLists.txt` compiles the library parts (trs-io,
+  frehd, trs-fs, retrostore, tcpip, xfer, libsmb2) plus upstream's
+  `main/settings.cpp`, and `components/trs-io/host/` stands in for the
+  board: FPGA/LED calls are no-ops, `spi_trs_io_done()` tells the emulator
+  a deferred TRS-IO command finished (port E0H bit 3, `ptrs/io.cpp`).
+- Upstream's app headers (`settings.h`, `io.h`, ...) are PRIVATE to the
+  wrapper: ptrs has its own files with those names. Upstream's
+  `init_settings()` is compiled as `trs_io_init_settings()` for the same
+  reason. TrashBoy talks to TRS-IO through `host/include/trs_io_host.h`.
+- The RetroStore client is our `components/retrostore-c-sdk`; the copy
+  nested in TRS-IO is not compiled.
+- The web UI is upstream's prebuilt `src/esp/html/built`, gzipped into the
+  `html` SPIFFS partition (256K) by the wrapper; `idf.py flash` writes it.
+  In Mini TRS mode `trs_io_host_start_network()` mounts it and starts
+  Wi-Fi + the web server; `trs_io_host_poll()` (status-bar task, stack in
+  PSRAM) does upstream's `check_events()`: web server and SMB mount once
+  Wi-Fi is up. Web-UI firmware updates are refused (they'd install
+  TRS-IO's firmware).
+- Upstream code needed for IDF v6 / ESP32-S3: `esp_mac.h` for MACSTR,
+  `SPI2_HOST` for `HSPI_HOST`, `-fno-char8_t` (u8"" printer table), and
+  `MG_ARCH=MG_ARCH_ESP32` (upstream sets it project-wide).
+
 ## Second board: Seeed SenseCAP Watcher (experimental)
 
 Round 412x412 SPD2010 LCD on QSPI, a wheel (rotary encoder + push button),
@@ -331,9 +363,9 @@ constants in `watcher_main.cpp` are first guesses that have not been tuned.
   check where the Z80 is executing before touching the input path. Booting
   the ROM before loading does NOT help (the game overwrites the DCB) and
   makes every launch seconds slower.
-- trs-io's `configure()` form has its OWN Wi-Fi credential store
-  (`set_wifi_credentials` reboots the chip!) — unrelated to our
-  wifi_manager NVS creds.
+- TRS-IO's settings (Wi-Fi, SMB, time zone; NVS namespace `retrostore`)
+  are its OWN store, unrelated to our wifi_manager NVS creds. The TRS-80
+  Config screen edits them via `trs_io_host_*`; a Wi-Fi change reboots.
 - SD-card init (`init_trs_fs_posix`) is intentionally not called (no card,
   noisy failures, GPIO overlap with panel SPI); FreHD file ops are
   null-safe without it.

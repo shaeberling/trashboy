@@ -9,3 +9,5 @@ games,      data, fat,      ,        8M,
 # FreHD's files (FREHD.ROM + hard-disk images), read-only, memory-mapped;
 # see main/flash_disk.cpp and scripts/pack_trs_disk.py. Custom subtype.
 trsdisk,    data, 0x40,     ,        2M,
+# TRS-IO's web UI (gzipped), built by components/trs-io/CMakeLists.txt.
+html,       data, spiffs,   ,        256K,

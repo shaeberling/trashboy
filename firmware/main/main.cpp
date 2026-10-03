@@ -34,6 +34,7 @@ extern "C" {
 #include "storage.h"
 #include "trs-io.h"
 #include "trs-fs.h"
+#include "trs_io_host.h"
 #include "event.h"
 #include "sound.h"
 #include "battery.h"
@@ -774,26 +775,27 @@ static void wifi_bar_set(const char *fmt, ...) {
 }
 
 #if CONFIG_TRASHBOY_ENABLE_MINI_TRS_MODE
-// CONFIG_TRASHBOY_ENABLE_MINI_TRS_MODE: TRS-IO runs Wi-Fi (init_wifi() in
-// z80_task). This task only mirrors TRS-IO's state in the status bar:
-// "TRS-IO" on the left so it's clear who is in charge, plus the network,
-// and the address of TRS-IO's web server on the right.
+// CONFIG_TRASHBOY_ENABLE_MINI_TRS_MODE: TRS-IO runs Wi-Fi (started in
+// z80_task). This task mirrors TRS-IO's state in the status bar: "TRS-IO" on
+// the left so it's clear who is in charge, plus the network, and the address
+// of TRS-IO's web server on the right. It also runs TRS-IO's event poll,
+// which starts the web server and mounts the SMB share once Wi-Fi is up (on
+// this task's stack: 6 KB, in PSRAM, see app_main).
 static void wifi_trs_io_status_task(void *arg) {
   (void) arg;
   static char right[2][24];
   static int right_idx = 0;
   int last_status = -1;
   char last_ip[20] = "\x01";
-  // TRS-IO's NVS handle and Wi-Fi are set up in z80_task (init_storage,
-  // init_wifi); get_wifi_ssid() asserts without them.
+  // TRS-IO's settings, events and Wi-Fi are set up in z80_task.
   wifi_bar_set("TRS-IO: starting...");
   wait_z80_ready();
   for (;;) {
+    trs_io_host_poll();
     const int st = *get_wifi_status();
     if (st != last_status) {
       last_status = st;
-      // get_wifi_ssid() reads NVS (flash): only on a change.
-      const char *ssid = get_wifi_ssid();
+      const char *ssid = trs_io_host_wifi_ssid();
       switch (st) {
         case RS_STATUS_WIFI_CONNECTED:
           wifi_bar_set("TRS-IO: %s", ssid);
@@ -824,7 +826,7 @@ static void wifi_trs_io_status_task(void *arg) {
       strlcpy(right[right_idx], ip, sizeof(right[0]));
       splash_set_statusbar_right(right[right_idx]);
     }
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    vTaskDelay(pdMS_TO_TICKS(500));
   }
 }
 #endif
@@ -1484,6 +1486,9 @@ void z80_task(void *arg)
   init_storage();
   init_events();
   init_trs_io();
+  // TRS-IO's settings (Wi-Fi, SMB share, time zone; NVS "retrostore"): its
+  // modules read them, e.g. a TRS-80 program asking for the Wi-Fi network.
+  trs_io_host_init();
   // FreHD: its state (drives closed, status READY), then the files in the
   // trsdisk flash partition, if any (FREHD.ROM + hard-disk images, read-only).
   // Without them FreHD has no storage until TRS-IO mounts an SMB share.
@@ -1499,7 +1504,7 @@ void z80_task(void *arg)
   // TRS-IO runs Wi-Fi: it connects from its own NVS keys (or opens its
   // "TRS-IO" config access point) and starts its web server, NTP, mDNS and
   // the SMB share. wifi_manager is not started (see app_main).
-  init_wifi();
+  trs_io_host_start_network();
 #else
   // init_wifi() (from trs-io) is intentionally NOT called: it auto-connects
   // from its own NVS keys and starts the web-config AP if no creds are
@@ -1734,7 +1739,10 @@ extern "C" void app_main(void)
   xTaskCreatePinnedToCore(flow_task, "ui_flow", 8192, NULL, 5, NULL, 0);
   xTaskCreatePinnedToCore(bt_task, "bt_task", 6000, NULL, 5, NULL, 0);
 #if CONFIG_TRASHBOY_ENABLE_MINI_TRS_MODE
-  xTaskCreatePinnedToCore(wifi_trs_io_status_task, "wifi_bg", 3072, NULL, 4, NULL, 0);
+  // Stack in PSRAM: internal RAM is tight in this mode, and nothing on this
+  // task writes flash (which a PSRAM stack would not survive).
+  xTaskCreatePinnedToCoreWithCaps(wifi_trs_io_status_task, "wifi_bg", 6144, NULL, 4, NULL, 0,
+                                  MALLOC_CAP_SPIRAM);
 #else
   xTaskCreatePinnedToCore(wifi_bg_task, "wifi_bg", 4096, NULL, 4, NULL, 0);
 #endif
