@@ -38,6 +38,8 @@ extern "C" {
 #include "sound.h"
 #include "battery.h"
 #include "games_cache.h"
+#include "flash_disk.h"
+#include "io.h"
 #include <string>
 #include <vector>
 
@@ -1482,6 +1484,11 @@ void z80_task(void *arg)
   init_storage();
   init_events();
   init_trs_io();
+  // FreHD: its state (drives closed, status READY), then the files in the
+  // trsdisk flash partition, if any (FREHD.ROM + hard-disk images, read-only).
+  // Without them FreHD has no storage until TRS-IO mounts an SMB share.
+  init_io();
+  flash_disk_mount();
   // init_trs_fs_posix() (SD-card FS for FreHD) is intentionally NOT called:
   // we don't use the SD slot (games come from the internal-flash cache), the
   // probe fails noisily on every boot with no card inserted, and it re-muxes

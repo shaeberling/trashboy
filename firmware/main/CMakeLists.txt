@@ -19,6 +19,7 @@ else()
              "input.cpp"
              "osk.cpp"
              "games_cache.cpp"
+             "flash_disk.cpp"
              "battery.cpp"
              "splash.c"
              "wifi_manager.c"
@@ -48,7 +49,22 @@ idf_component_register(
                                      "./MCP23017"
                                      "./watcher"
                                      "."
-                        REQUIRES ptrs trs-lib retrostore-c-sdk esp_driver_spi esp_driver_ledc esp_lcd nvs_flash bt_keyboard driver bt esp_wifi esp_netif esp_event fatfs esp_adc
+                        REQUIRES ptrs trs-lib retrostore-c-sdk esp_driver_spi esp_driver_ledc esp_lcd nvs_flash bt_keyboard driver bt esp_wifi esp_netif esp_event fatfs esp_adc esp_partition
                                  esp_driver_gpio esp_driver_i2c esp_driver_pcnt esp_timer)
 # esp_lcd_touch_gt911 is added automatically by the IDF Component Manager
 # from main/idf_component.yml — it does not need to be listed in REQUIRES.
+
+# FreHD's files in internal flash (main/flash_disk.cpp): FREHD.ROM and
+# hard-disk images, packed into trsdisk.bin by scripts/pack_trs_disk.py. Not
+# in the repository (the DOS images aren't ours to publish) and not part of
+# `idf.py flash`, which would rewrite ~800 KB every time: write it once with
+# `idf.py trsdisk-flash`.
+if(NOT CONFIG_TRASHBOY_BOARD_SENSECAP_WATCHER)
+    set(trsdisk_image "${PROJECT_DIR}/trsdisk.bin")
+    idf_component_get_property(main_args esptool_py FLASH_ARGS)
+    idf_component_get_property(sub_args esptool_py FLASH_SUB_ARGS)
+    esptool_py_flash_target(trsdisk-flash "${main_args}" "${sub_args}" ALWAYS_PLAINTEXT)
+    if(EXISTS "${trsdisk_image}")
+        esptool_py_flash_to_partition(trsdisk-flash "trsdisk" "${trsdisk_image}")
+    endif()
+endif()

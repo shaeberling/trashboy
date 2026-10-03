@@ -11,3 +11,5 @@ tags
 build-watcher/
 watcher-backup/
 main/watcher/breakdown.cmd
+# FreHD files for the trsdisk partition (scripts/pack_trs_disk.py)
+trsdisk.bin

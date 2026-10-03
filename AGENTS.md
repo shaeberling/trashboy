@@ -233,6 +233,23 @@ restarted stream is as fragile as a freshly booted one.
   works fully offline; launch reads the CMD from flash into the PSRAM
   launch buffer.
 
+## FreHD hard disk in flash (read-only)
+
+- The `trsdisk` partition (2 MB, after `games`) holds FreHD's files:
+  FREHD.ROM (FreHD's boot loader opens it by name) + hard-disk images with
+  an autoboot entry (NEWDOS3D). `scripts/pack_trs_disk.py` packs them
+  (only the 256-byte blocks with data; NEWDOS3D 64 MB -> 760 KB) into
+  `firmware/trsdisk.bin` (gitignored: the DOS images aren't ours to
+  publish); `idf.py trsdisk-flash` writes it. Plain `idf.py flash` leaves
+  it alone.
+- `main/flash_disk.cpp` memory-maps it and registers it with TRS-IO as a
+  `TRS_FS` backend via `init_trs_fs_local()` (our hook in the trs-io
+  submodule, branch `trashboy`): SD card > flash > SMB. While the partition
+  holds files, FreHD does not see the SMB share. Writes return
+  FR_WRITE_PROTECTED and the packer sets the image's write-protect flag.
+- `init_io()` (FreHD state init) was never called before this; z80_task
+  now calls it, then `flash_disk_mount()`.
+
 ## Second board: Seeed SenseCAP Watcher (experimental)
 
 Round 412x412 SPD2010 LCD on QSPI, a wheel (rotary encoder + push button),
