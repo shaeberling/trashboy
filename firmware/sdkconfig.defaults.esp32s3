@@ -42,3 +42,19 @@ CONFIG_LV_FONT_MONTSERRAT_48=y
 # main.cpp does one explicit esp_lcd_rgb_panel_restart() after flash-write
 # bursts (game-cache mount/sync) to guarantee realignment.
 
+
+# mDNS (started by TRS-IO's web server) in PSRAM, task stack included: once
+# Wi-Fi is up internal RAM has ~7 KB in one piece, and TRS-IO aborts the
+# whole firmware (ESP_ERROR_CHECK) when mdns_init() can't get its 4 KB stack.
+CONFIG_MDNS_TASK_CREATE_FROM_SPIRAM=y
+CONFIG_MDNS_MEMORY_ALLOC_SPIRAM=y
+
+# Internal SRAM is the scarce resource with Wi-Fi + BLE + TRS-IO's web server
+# + the emulator: in Mini TRS mode it ran down to 1 KB free, the Wi-Fi driver
+# failed allocations ("wifi:m f null") and the web UI took minutes to load.
+# Let Wi-Fi/lwIP and Bluetooth buffers live in PSRAM, and let malloc() use
+# PSRAM for anything over 1 KB (the default 16 KB kept e.g. every web-server
+# connection buffer internal).
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
