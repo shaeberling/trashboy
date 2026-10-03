@@ -30,7 +30,18 @@ extern "C" {
 #define EXAMPLE_LCD_V_RES              640
 #define EXAMPLE_LCD_H_RES              480
 
-#define EXAMPLE_LCD_PIXEL_CLOCK_HZ     (8 * 1000 * 1000)
+// One frame is 548 x 668 pixel clocks (active area + porches + sync, see
+// ST7701S.c), so 17 MHz is ~46 Hz refresh: every step of a game that
+// updates 30x/s gets shown. The vendor demo ran at 17 MHz; it had been
+// lowered to 8 MHz (~22 Hz) while the panel read the frame buffer straight
+// from PSRAM. With bounce buffers the panel tolerates the faster rate.
+//
+// 22 MHz (~60 Hz) was smoother still in games but made the menus glitch
+// while moving the selection: each 10-line bounce buffer then lasts only
+// ~250 us, and the refill interrupt misses that while LVGL is redrawing.
+// Bigger bounce buffers would buy time but internal RAM is already at the
+// coex limit (largest free block ~18-20 KB).
+#define EXAMPLE_LCD_PIXEL_CLOCK_HZ     (17 * 1000 * 1000)
 #define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL  1
 #define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
 #define EXAMPLE_PIN_NUM_BK_LIGHT       6
