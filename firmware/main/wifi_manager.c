@@ -170,11 +170,9 @@ bool wifi_mgr_connect(const char *ssid, const char *password, int timeout_ms)
     // that matches our credentials.
     cfg.sta.threshold.authmode = (password && password[0]) ? WIFI_AUTH_WEP : WIFI_AUTH_OPEN;
 
-    // Diagnostic: log credentials (the user asked for the password to be
-    // visible while we're debugging connection failures). This is a
-    // deliberate security trade-off — remove once Wi-Fi setup is stable.
-    ESP_LOGI(TAG, "wifi_mgr_connect: SSID='%s' PASSWORD='%s'",
-             ssid, (password && password[0]) ? password : "(empty)");
+    // Never log the password itself: the log ends up in captures and pastes.
+    ESP_LOGI(TAG, "wifi_mgr_connect: SSID='%s' (%s)",
+             ssid, (password && password[0]) ? "with password" : "open");
 
     xEventGroupClearBits(s_events, WIFI_BIT_CONNECTED | WIFI_BIT_FAILED);
     s_retry_count = 0;
