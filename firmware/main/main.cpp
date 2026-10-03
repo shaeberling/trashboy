@@ -630,8 +630,17 @@ static void sync_flash_phase_cb(bool writing) {
   }
 }
 
+// Is there a Wi-Fi connection, whoever runs Wi-Fi?
+static bool wifi_is_connected() {
+#if CONFIG_TRASHBOY_ENABLE_MINI_TRS_MODE
+  return *get_wifi_status() == RS_STATUS_WIFI_CONNECTED;
+#else
+  return wifi_mgr_is_connected();
+#endif
+}
+
 static void run_games_sync() {
-  if (!wifi_mgr_is_connected()) {
+  if (!wifi_is_connected()) {
     splash_set_status("Wi-Fi not connected - can't sync");
     vTaskDelay(pdMS_TO_TICKS(2000));
     return;
@@ -762,6 +771,62 @@ static void wifi_bar_set(const char *fmt, ...) {
   splash_set_statusbar(g_wifi_bar_buf[g_wifi_bar_idx]);
 }
 
+#if CONFIG_TRASHBOY_ENABLE_MINI_TRS_MODE
+// CONFIG_TRASHBOY_ENABLE_MINI_TRS_MODE: TRS-IO runs Wi-Fi (init_wifi() in
+// z80_task). This task only mirrors TRS-IO's state in the status bar:
+// "TRS-IO" on the left so it's clear who is in charge, plus the network,
+// and the address of TRS-IO's web server on the right.
+static void wifi_trs_io_status_task(void *arg) {
+  (void) arg;
+  static char right[2][24];
+  static int right_idx = 0;
+  int last_status = -1;
+  char last_ip[20] = "\x01";
+  // TRS-IO's NVS handle and Wi-Fi are set up in z80_task (init_storage,
+  // init_wifi); get_wifi_ssid() asserts without them.
+  wifi_bar_set("TRS-IO: starting...");
+  wait_z80_ready();
+  for (;;) {
+    const int st = *get_wifi_status();
+    if (st != last_status) {
+      last_status = st;
+      // get_wifi_ssid() reads NVS (flash): only on a change.
+      const char *ssid = get_wifi_ssid();
+      switch (st) {
+        case RS_STATUS_WIFI_CONNECTED:
+          wifi_bar_set("TRS-IO: %s", ssid);
+          break;
+        case RS_STATUS_WIFI_NOT_CONFIGURED:
+          wifi_bar_set("TRS-IO: not set up - join Wi-Fi \"TRS-IO\"");
+          break;
+        case RS_STATUS_WIFI_NOT_CONNECTED:
+          wifi_bar_set("TRS-IO: %s - not connected", ssid);
+          break;
+        default:
+          wifi_bar_set("TRS-IO: connecting to %s...", ssid);
+          break;
+      }
+    }
+
+    // The web server's address: the station IP once connected, the access
+    // point's (fixed default) address while TRS-IO is not set up.
+    char ip[20] = "";
+    if (st == RS_STATUS_WIFI_CONNECTED) {
+      strlcpy(ip, get_wifi_ip(), sizeof(ip));
+    } else if (st == RS_STATUS_WIFI_NOT_CONFIGURED) {
+      strlcpy(ip, "192.168.4.1", sizeof(ip));
+    }
+    if (strcmp(ip, last_ip) != 0) {
+      strlcpy(last_ip, ip, sizeof(last_ip));
+      right_idx ^= 1;
+      strlcpy(right[right_idx], ip, sizeof(right[0]));
+      splash_set_statusbar_right(right[right_idx]);
+    }
+    vTaskDelay(pdMS_TO_TICKS(2000));
+  }
+}
+#endif
+
 // Auto-connect from preset/stored credentials, then keep the status bar in
 // sync with reality (Settings may connect later, or the AP may drop).
 static void wifi_bg_task(void *arg) {
@@ -794,8 +859,22 @@ static void wifi_bg_task(void *arg) {
   }
 
   bool last = false, first = true;
+  // The IP address shown on the right of the bar; refreshed every pass,
+  // since it can arrive a moment after "connected" or change on a DHCP
+  // renewal. Ping-pong buffers like the SSID text.
+  static char ip_buf[2][16];
+  static int ip_idx = 0;
+  char ip_shown[16] = "";
   for (;;) {
     bool c = wifi_mgr_is_connected();
+    char ip[16];
+    wifi_mgr_get_ip(ip, sizeof(ip));
+    if (strcmp(ip, ip_shown) != 0) {
+      strlcpy(ip_shown, ip, sizeof(ip_shown));
+      ip_idx ^= 1;
+      strlcpy(ip_buf[ip_idx], ip, sizeof(ip_buf[0]));
+      splash_set_statusbar_right(ip_buf[ip_idx]);
+    }
     if (c != last || first) {
       first = false;
       last = c;
@@ -1202,7 +1281,16 @@ static void run_settings_menu() {
                                    "Back" };
     int sel = run_menu_select("Settings", items, 8);
     if (sel == 0) {
+#if CONFIG_TRASHBOY_ENABLE_MINI_TRS_MODE
+      // TRS-IO owns Wi-Fi; its settings live on its own web page.
+      show_error_screen(*get_wifi_status() == RS_STATUS_WIFI_CONNECTED
+          ? "Wi-Fi is run by TRS-IO: change it on its web page "
+            "(the address on the right of the status bar)"
+          : "Wi-Fi is run by TRS-IO: join the Wi-Fi network \"TRS-IO\", "
+            "then open http://192.168.4.1");
+#else
       run_wifi_interactive_setup();
+#endif
       splash_hide_list();
     } else if (sel == 1) {
       run_games_sync();
@@ -1228,7 +1316,11 @@ static void run_settings_menu() {
 // signal strength, pairing, a passkey to type, the result) until the user
 // presses ENTER, then hands over to the main menu. Pairing carries on in
 // the background either way.
-static void run_bt_auto_pair_screen() {
+//
+// In Mini TRS mode the screen also ends by itself once a keyboard is
+// connected; the return value says so (true = start the TRS-80).
+static bool run_bt_auto_pair_screen() {
+  bool keyboard_ready = false;
   static char status[2][96];
   static int status_idx = 0;
   char prev_status[96] = "";
@@ -1242,7 +1334,12 @@ static void run_bt_auto_pair_screen() {
 
   input_flush();
   splash_hide_list();
+#if CONFIG_TRASHBOY_ENABLE_MINI_TRS_MODE
+  splash_set_subtext("The TRS-80 starts once a keyboard is connected "
+                     "(ENTER: menu instead)");
+#else
   splash_set_subtext("ENTER: continue to the menu");
+#endif
 
   while (true) {
     bt_ap_status_t ap;
@@ -1317,6 +1414,17 @@ static void run_bt_auto_pair_screen() {
       prev_sel = sel;
     }
 
+#if CONFIG_TRASHBOY_ENABLE_MINI_TRS_MODE
+    // Mini TRS mode: the keyboard is the whole user interface, so once it
+    // is connected there is nothing left to wait for. Leave the
+    // "connected" line up for a moment first.
+    if (g_bt_ready && bt_keyboard.is_connected()) {
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      keyboard_ready = true;
+      break;
+    }
+#endif
+
     // ENTER (board button or a keyboard) leaves; poll the status again
     // every 200 ms otherwise.
     BTKeyboard::KeyInfo inf;
@@ -1329,6 +1437,7 @@ static void run_bt_auto_pair_screen() {
   splash_hide_list();
   splash_set_subtext("");
   drain_bt_events();
+  return keyboard_ready;
 }
 #endif
 
@@ -1336,7 +1445,16 @@ static void flow_task(void *arg) {
   (void) arg;
   splash_set_compact();
 #if CONFIG_TRASHBOY_BT_AUTO_PAIR
-  run_bt_auto_pair_screen();
+  const bool keyboard_ready = run_bt_auto_pair_screen();
+#if CONFIG_TRASHBOY_ENABLE_MINI_TRS_MODE
+  if (keyboard_ready) {
+    // Mini TRS mode: straight into the TRS-80. No CMD is staged, so this
+    // boots the ROM. Page Up returns to the main menu below as usual.
+    run_game_session();
+  }
+#else
+  (void) keyboard_ready;
+#endif
 #endif
   // NOTE: games_cache_mount() happens in app_main BEFORE LCD_Init — flash
   // work during early panel streaming kills the RGB DMA (see app_main).
@@ -1370,10 +1488,17 @@ void z80_task(void *arg)
   // GPIO 1/2 — the same pins the ST7701S panel-init SPI uses. FreHD file ops
   // are null-safe without it (fileio.cpp returns FR_NOT_READY). Re-enable if
   // SD storage is ever actually used (e.g. disk-image support).
+#if CONFIG_TRASHBOY_ENABLE_MINI_TRS_MODE
+  // TRS-IO runs Wi-Fi: it connects from its own NVS keys (or opens its
+  // "TRS-IO" config access point) and starts its web server, NTP, mDNS and
+  // the SMB share. wifi_manager is not started (see app_main).
+  init_wifi();
+#else
   // init_wifi() (from trs-io) is intentionally NOT called: it auto-connects
   // from its own NVS keys and starts the web-config AP if no creds are
   // stored. We drive the whole Wi-Fi lifecycle from the menu via
-  // wifi_manager.
+  // wifi_manager. (CONFIG_TRASHBOY_ENABLE_MINI_TRS_MODE switches to TRS-IO.)
+#endif
   init_trs_lib();
   init_sound();
 
@@ -1601,7 +1726,11 @@ extern "C" void app_main(void)
   xTaskCreatePinnedToCore(display_task, "display", 8192, NULL, 5, NULL, 1);
   xTaskCreatePinnedToCore(flow_task, "ui_flow", 8192, NULL, 5, NULL, 0);
   xTaskCreatePinnedToCore(bt_task, "bt_task", 6000, NULL, 5, NULL, 0);
+#if CONFIG_TRASHBOY_ENABLE_MINI_TRS_MODE
+  xTaskCreatePinnedToCore(wifi_trs_io_status_task, "wifi_bg", 3072, NULL, 4, NULL, 0);
+#else
   xTaskCreatePinnedToCore(wifi_bg_task, "wifi_bg", 4096, NULL, 4, NULL, 0);
+#endif
   xTaskCreatePinnedToCore(heap_diag_task, "heap_diag", 3072, NULL, 1, NULL, 0);
   z80_task(NULL);
 }

@@ -26,6 +26,10 @@ void splash_set_subtext_right(const char *text);
 // valid until the next call (use literals or a stable buffer).
 void splash_set_statusbar(const char *text);
 
+// Right-aligned text in the same bar (the device's IP address while Wi-Fi
+// is connected). Pass "" to clear. Same lifetime rule as above.
+void splash_set_statusbar_right(const char *text);
+
 // Green progress bar below the status line: hollow (green border) at 0,
 // filling green as `percent` grows. Pass 0..100 to show/update, -1 to hide.
 void splash_set_progress(int percent);

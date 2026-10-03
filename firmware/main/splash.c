@@ -54,6 +54,9 @@ static const char *TAG = "splash";
 #define STATUSBAR_H            30
 #define STATUSBAR_FONT         (&lv_font_montserrat_14)
 #define STATUSBAR_PAD_X        12
+// Room kept free on the right of the bar for the IP address
+// ("255.255.255.255" in Montserrat 14 is ~110 px).
+#define STATUSBAR_RIGHT_W      130
 
 static int g_status_user_top  = 0;
 static int g_list_user_top    = 0;
@@ -66,12 +69,14 @@ static lv_obj_t *splash_subtext      = NULL;
 static lv_obj_t *splash_subtext_right = NULL;
 static lv_obj_t *statusbar_box       = NULL;
 static lv_obj_t *statusbar_label     = NULL;
+static lv_obj_t *statusbar_right     = NULL;
 static lv_obj_t *progress_bar        = NULL;
 
 static const char * volatile pending_status        = NULL;
 static const char * volatile pending_subtext       = NULL;
 static const char * volatile pending_subtext_right = NULL;
 static const char * volatile pending_statusbar     = NULL;
+static const char * volatile pending_statusbar_right = NULL;
 static volatile bool pending_compact = false;
 
 // Progress bar request: INT_MIN = no change, -1 = hide, 0..100 = show/update.
@@ -183,14 +188,30 @@ void splash_init(void)
     lv_obj_set_style_text_font(statusbar_label, STATUSBAR_FONT, 0);
     lv_obj_set_style_bg_opa(statusbar_label, LV_OPA_TRANSP, 0);
     lv_label_set_long_mode(statusbar_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_width(statusbar_label, USER_W - 2 * STATUSBAR_PAD_X);
+    lv_obj_set_width(statusbar_label,
+                     USER_W - 2 * STATUSBAR_PAD_X - STATUSBAR_RIGHT_W);
     lv_obj_align(statusbar_label, LV_ALIGN_LEFT_MID, STATUSBAR_PAD_X, 0);
     lv_label_set_text(statusbar_label, LV_SYMBOL_WIFI "  ...");
+
+    statusbar_right = lv_label_create(statusbar_box);
+    lv_obj_set_style_text_color(statusbar_right, lv_color_black(), 0);
+    lv_obj_set_style_text_font(statusbar_right, STATUSBAR_FONT, 0);
+    lv_obj_set_style_bg_opa(statusbar_right, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_text_align(statusbar_right, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_label_set_long_mode(statusbar_right, LV_LABEL_LONG_CLIP);
+    lv_obj_set_width(statusbar_right, STATUSBAR_RIGHT_W);
+    lv_obj_align(statusbar_right, LV_ALIGN_RIGHT_MID, -STATUSBAR_PAD_X, 0);
+    lv_label_set_text(statusbar_right, "");
 
     apply_layout(false /* start big */);
 
     ESP_LOGI(TAG, "splash created (landscape %dx%d via lv_display rotation)",
              USER_W, USER_H);
+}
+
+void splash_set_statusbar_right(const char *text)
+{
+    pending_statusbar_right = text ? text : "";
 }
 
 void splash_set_statusbar(const char *text)
@@ -420,6 +441,14 @@ void splash_tick(void)
         }
     }
 
+    const char *bar_right = pending_statusbar_right;
+    if (bar_right != NULL) {
+        pending_statusbar_right = NULL;
+        if (statusbar_right != NULL) {
+            lv_label_set_text(statusbar_right, bar_right);
+        }
+    }
+
     int prog = pending_progress;
     if (prog != PROGRESS_NONE) {
         pending_progress = PROGRESS_NONE;
@@ -453,6 +482,7 @@ void splash_dismiss(void)
         splash_logo = NULL;
         statusbar_box = NULL;
         statusbar_label = NULL;
+        statusbar_right = NULL;
         progress_bar = NULL;
     }
 }

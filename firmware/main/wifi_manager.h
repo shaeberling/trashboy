@@ -30,6 +30,10 @@ bool wifi_mgr_connect(const char *ssid, const char *password, int timeout_ms);
 
 bool wifi_mgr_is_connected(void);
 
+// The station's current IPv4 address as text ("192.168.1.23"). Returns
+// false (and leaves `out` empty) when not connected.
+bool wifi_mgr_get_ip(char *out, size_t len);
+
 // Read stored credentials from NVS. Returns false if either is missing.
 bool wifi_mgr_load_creds(char *ssid, size_t ssid_len,
                          char *password, size_t pass_len);

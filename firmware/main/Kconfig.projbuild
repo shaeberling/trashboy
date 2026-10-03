@@ -36,6 +36,28 @@ config TRASHBOY_BT_AUTO_PAIR
       touch). Note that after "Unpair" in Settings the board will grab the
       next keyboard in pairing mode again.
 
+config TRASHBOY_ENABLE_MINI_TRS_MODE
+    bool "Mini TRS mode: a plain TRS-80 with TRS-IO, driven by a BT keyboard"
+    default n
+    select TRASHBOY_BT_AUTO_PAIR
+    help
+      Turns the board into a small TRS-80 Model III with TRS-IO, for a
+      board without buttons or touch:
+
+      - Wi-Fi is run by TRS-IO (the trs-io submodule) instead of TrashBoy's
+        own Wi-Fi manager. TRS-IO connects with its own stored credentials
+        and runs its web server (http://trs-io.local or the IP shown in the
+        status bar): settings for Wi-Fi, SMB share and time zone, virtual
+        printer, status, log. It also syncs the time and mounts the SMB
+        share if one is set. With no Wi-Fi configured it opens an open
+        access point named "TRS-IO"; join it and open http://192.168.4.1.
+        Saving Wi-Fi settings there reboots the device. TrashBoy's preset
+        credentials and Settings -> Wi-Fi Setup are not used.
+      - A Bluetooth keyboard is paired automatically (selects
+        TRASHBOY_BT_AUTO_PAIR), and as soon as one is connected the board
+        boots the TRS-80 ROM, with no game loaded, instead of showing the
+        main menu. Page Up leaves the TRS-80 for the menu as usual.
+
 config TRASHBOY_WIFI_USE_PRESET
     bool "Use preset Wi-Fi credentials instead of the interactive dialog"
     default n

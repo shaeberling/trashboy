@@ -286,6 +286,12 @@ constants in `watcher_main.cpp` are first guesses that have not been tuned.
 ## Dev toggles (menuconfig -> Trashboy)
 
 - `TRASHBOY_BT_AUTO_PAIR` (pair the first BT keyboard found, no input needed)
+- `TRASHBOY_ENABLE_MINI_TRS_MODE` (board without buttons/touch: TRS-IO's
+  `init_wifi()` runs Wi-Fi instead of wifi_manager — web server, SMB, NTP,
+  printer, its own creds/"TRS-IO" AP; status bar says "TRS-IO: ..." with
+  the web address on the right; selects `TRASHBOY_BT_AUTO_PAIR`; boots the
+  TRS-80 ROM as soon as the BT keyboard is connected. Internal RAM gets very
+  tight in this mode — largest free block measured 3-7 KB)
 - `TRASHBOY_WIFI_USE_PRESET` + SSID/password (dev-only; lives in sdkconfig)
 - `TRASHBOY_SOUND_DIAG` (audio test tone + telemetry)
 - `TRASHBOY_PERF_DIAG` (two `perf` log lines per second during a game:
