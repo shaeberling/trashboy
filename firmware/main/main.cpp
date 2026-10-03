@@ -1277,13 +1277,34 @@ static void run_restart() {
   esp_restart();
 }
 
+// Settings -> Screen Color: the TRS-80 screen's phosphor. The same setting
+// as F5 TRS-80 Config and TRS-IO's web UI (settingsScreen keeps them in
+// step).
+static void run_screen_color_menu() {
+  static const char *names[] = { "White", "Green", "Amber" };
+  const int current = (int) settingsScreen.getScreenColor();
+  char labels[3][24];
+  const char *items[4];
+  for (int i = 0; i < 3; i++) {
+    snprintf(labels[i], sizeof(labels[i]), "%s%s", names[i],
+             (i == current) ? "  (current)" : "");
+    items[i] = labels[i];
+  }
+  items[3] = "Back";
+  int sel = run_menu_select("Screen Color", items, 4);
+  if (sel >= 0 && sel < 3 && sel != current) {
+    settingsScreen.setScreenColor((screen_color_t) sel);
+    lcd_resync_after_flash_writes();  // stored in NVS
+  }
+}
+
 static void run_settings_menu() {
   while (true) {
     static const char *items[] = { "Wi-Fi Setup", "Sync Games",
                                    "Bluetooth Keyboard", "TRS-80 Config",
-                                   "Battery", "Input Test", "Restart",
-                                   "Back" };
-    int sel = run_menu_select("Settings", items, 8);
+                                   "Screen Color", "Battery", "Input Test",
+                                   "Restart", "Back" };
+    int sel = run_menu_select("Settings", items, 9);
     if (sel == 0) {
 #if CONFIG_TRASHBOY_ENABLE_MINI_TRS_MODE
       // TRS-IO owns Wi-Fi; its settings live on its own web page.
@@ -1303,10 +1324,12 @@ static void run_settings_menu() {
     } else if (sel == 3) {
       run_trs_config();
     } else if (sel == 4) {
-      run_battery_screen();
+      run_screen_color_menu();
     } else if (sel == 5) {
-      run_input_test();
+      run_battery_screen();
     } else if (sel == 6) {
+      run_input_test();
+    } else if (sel == 7) {
       run_restart();
     } else {
       return;  // "Back", ESC or A7
@@ -1480,6 +1503,13 @@ static void flow_task(void *arg) {
   }
 }
 
+static void apply_web_screen_color(uint8_t color)
+{
+  if (color <= SCREEN_COLOR_AMBER) {
+    settingsScreen.setScreenColor((screen_color_t) color);
+  }
+}
+
 void z80_task(void *arg)
 {
   init_settings();
@@ -1489,6 +1519,12 @@ void z80_task(void *arg)
   // TRS-IO's settings (Wi-Fi, SMB share, time zone; NVS "retrostore"): its
   // modules read them, e.g. a TRS-80 program asking for the Wi-Fi network.
   trs_io_host_init();
+  // The phosphor color is set in two places, F5 TRS-80 Config (ptrs) and
+  // TRS-IO's web UI: TRS-IO's copy follows ours, the web UI's choice is
+  // applied to the screen (from the web server's task; createCanvas() takes
+  // the screen's mutex).
+  trs_io_host_set_screen_color((uint8_t) settingsScreen.getScreenColor());
+  trs_io_host_set_screen_color_handler(apply_web_screen_color);
   // FreHD: its state (drives closed, status READY), then the files in the
   // trsdisk flash partition, if any (FREHD.ROM + hard-disk images, read-only).
   // Without them FreHD has no storage until TRS-IO mounts an SMB share.

@@ -5,6 +5,8 @@
 // trs-io component compiles TRS-IO's library parts and takes the board parts
 // from host/ (see host/host.cpp); this is what the rest of TrashBoy calls.
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -44,6 +46,13 @@ void trs_io_host_get_config(trs_io_host_config_t *config);
 void trs_io_host_set_tz(const char *tz);
 void trs_io_host_set_smb(const char *url, const char *user, const char *passwd);
 void trs_io_host_set_wifi(const char *ssid, const char *passwd);
+
+// Screen color (0 white, 1 green, 2 amber), shared with the web UI.
+// trs_io_host_set_screen_color() stores it as TRS-IO's setting (only if it
+// changed; ignored before trs_io_host_init()). The handler is called when
+// the web UI picks a color.
+void trs_io_host_set_screen_color(uint8_t color);
+void trs_io_host_set_screen_color_handler(void (*handler)(uint8_t color));
 
 // A TRS-IO command from the Z80 can finish later, from another task (the
 // web UI's file transfer does). The emulator registers how to tell the Z80

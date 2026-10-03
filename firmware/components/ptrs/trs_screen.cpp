@@ -2,6 +2,7 @@
 
 #include "trs_screen.h"
 #include "settings.h"
+#include "trs_io_host.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_rgb.h"
 #include <assert.h>
@@ -611,6 +612,8 @@ screen_color_t SettingsScreen::getScreenColor() {
 void SettingsScreen::setScreenColor(screen_color_t color) {
   nvs_set_u8(KEY_COLOR, color);
   trs_screen.createCanvas();
+  // TRS-IO's web UI shows and sets the same color.
+  trs_io_host_set_screen_color((uint8_t) color);
 }
 
 SettingsScreen settingsScreen;

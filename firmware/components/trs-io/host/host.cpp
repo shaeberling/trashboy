@@ -27,10 +27,14 @@
 void trs_io_init_settings();
 
 static void (*done_handler)(void) = NULL;
+static void (*screen_color_handler)(uint8_t) = NULL;
+// TRS-IO's settings are loaded (settings_commit() aborts before that).
+static bool settings_loaded = false;
 
 extern "C" void trs_io_host_init(void)
 {
   trs_io_init_settings();
+  settings_loaded = true;
 }
 
 extern "C" void trs_io_host_start_network(void)
@@ -83,6 +87,19 @@ extern "C" void trs_io_host_set_wifi(const char *ssid, const char *passwd)
   settings_commit();
 }
 
+extern "C" void trs_io_host_set_screen_color(uint8_t color)
+{
+  if (settings_loaded && settings_get_screen_color() != color) {
+    settings_set_screen_color(color);
+    settings_commit();
+  }
+}
+
+extern "C" void trs_io_host_set_screen_color_handler(void (*handler)(uint8_t color))
+{
+  screen_color_handler = handler;
+}
+
 extern "C" void trs_io_host_set_done_handler(void (*done)(void))
 {
   done_handler = done;
@@ -116,7 +133,8 @@ void init_led() {}
 void set_led(bool r, bool g, bool b, bool blink, bool auto_off) {}
 
 //----------------------------------------------------------------
-// spi.h: TRS-IO's FPGA. Nothing behind it here; reads return 0.
+// spi.h: TRS-IO's FPGA. Nothing behind it here; reads return 0, and
+// only the screen color and "command done" go anywhere.
 
 void init_spi() {}
 uint8_t spi_get_cookie() { return 0; }
@@ -134,7 +152,14 @@ void spi_set_breakpoint(uint8_t n, uint16_t addr) {}
 void spi_clear_breakpoint(uint8_t n) {}
 void spi_xray_resume() {}
 void spi_set_full_addr(bool flag) {}
-void spi_set_screen_color(uint8_t color) {}
+// The web UI's phosphor color: TRS-IO has already stored it; the emulator
+// draws the screen, so it gets told.
+void spi_set_screen_color(uint8_t color)
+{
+  if (screen_color_handler != NULL) {
+    screen_color_handler(color);
+  }
+}
 void spi_set_printer_en(bool enable) {}
 void spi_set_audio_output(uint8_t audio_output) {}
 void spi_send_keyb(uint8_t idx, uint8_t mask) {}
