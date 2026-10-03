@@ -78,6 +78,29 @@ this file is the working rules + hard-won gotchas.
    flickers constantly. Also: `CONFIG_SPI_FLASH_AUTO_SUSPEND` does nothing
    useful on this board's "generic" flash chip (tested; currently off).
 
+**Picture shifted and wrapped** (landscape view: everything moved down a
+few rows, the bottom rows — e.g. the status bar — reappear at the top) is
+the panel's pixel stream out of step with its frame timing. It happened
+whenever the DMA could not fetch from the PSRAM frame buffer in time (flash
+reads/writes on the shared bus, e.g. loading a game; heavy load), and it
+never healed: without bounce buffers the driver restarts the DMA only on
+request, and the ESP32-S3 has no LCD underrun interrupt.
+
+**Fixed 2026-10-02 by bounce buffers** (`bounce_buffer_size_px` in
+`ST7701S.c`; it had sat behind `CONFIG_EXAMPLE_USE_BOUNCE_BUFFER`, an
+example option this project never defined, so it was silently off). The
+DMA now sends from two small internal-RAM buffers that the LCD interrupt
+refills from PSRAM; the driver counts the refills and restarts the stream
+on the next VSYNC by itself if one was late. Cost: ~3 percentage points of
+Z80 idle headroom. Keep it on.
+
+**Do NOT request restarts at screen transitions.** Tried the same day,
+before bounce buffers: `esp_lcd_rgb_panel_restart()` on every UI mode
+switch and every menu. The first menu opened after that left the panel
+permanently black — the restarted stream died, as in rule 2, because the
+restart coincided with LVGL redrawing the whole screen. A freshly
+restarted stream is as fragile as a freshly booted one.
+
 ### Emulator screen: direct to the panel, not through LVGL
 
 - In GAME mode `TRSScreen::render()` draws changed glyphs **straight into
@@ -97,9 +120,15 @@ this file is the working rules + hard-won gotchas.
   the overlay is composited instead of being painted over.
 - Entering GAME mode does one `trs_screen.render()` + `lv_refr_now()` so the
   panel shows the canvas before direct writes start.
-- `display_task` sleeps one real tick (10 ms) per pass in GAME mode. The old
-  `vTaskDelay(pdMS_TO_TICKS(5))` is **0 ticks at 100 Hz** — a spin — and is
-  kept only outside games, where the menu animations were tuned against it.
+- In GAME mode `display_task` runs **once per panel frame, starting at the
+  VSYNC** (`LCD_SetVsyncNotifyTask()` in `ST7701S.c` wakes it), so
+  render() writes changed glyphs during the vertical blanking, before the
+  scan reaches them. Writing at arbitrary moments tore moving objects at
+  the scan line (the panel takes ~45 ms per frame at ~22 Hz). Still tears:
+  updates longer than the blanking (a full-screen redraw takes 30-40 ms);
+  fixing that needs a second frame buffer. Outside games the loop keeps
+  `vTaskDelay(pdMS_TO_TICKS(5))` — **0 ticks at 100 Hz**, a yield — which
+  the menu animations were tuned against.
 
 ## Memory placement
 

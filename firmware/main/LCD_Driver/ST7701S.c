@@ -208,9 +208,21 @@ SemaphoreHandle_t sem_gui_ready;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Task woken at every VSYNC (see LCD_SetVsyncNotifyTask). Read in the ISR.
+static volatile TaskHandle_t s_vsync_notify_task = NULL;
+
+void LCD_SetVsyncNotifyTask(TaskHandle_t task)
+{
+    s_vsync_notify_task = task;
+}
+
 static bool example_on_vsync_event(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *event_data, void *user_data)
 {
     BaseType_t high_task_awoken = pdFALSE;
+    TaskHandle_t notify = s_vsync_notify_task;
+    if (notify != NULL) {
+        vTaskNotifyGiveFromISR(notify, &high_task_awoken);
+    }
 #if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
     if (xSemaphoreTakeFromISR(sem_gui_ready, &high_task_awoken) == pdTRUE) {
         xSemaphoreGiveFromISR(sem_vsync_end, &high_task_awoken);
@@ -245,9 +257,21 @@ void LCD_Init(void)
     esp_lcd_rgb_panel_config_t panel_config = {
         .data_width = 16, // RGB565 in parallel mode, thus 16bit in width
         .num_fbs = EXAMPLE_LCD_NUM_FB,
-#if CONFIG_EXAMPLE_USE_BOUNCE_BUFFER
+        // Bounce buffers: the DMA sends from two small buffers in internal
+        // RAM, which an interrupt keeps refilled from the PSRAM frame buffer.
+        //
+        // Without them the DMA reads the frame buffer straight out of PSRAM.
+        // Any stall on the shared flash/PSRAM bus (e.g. reading a game from
+        // flash at launch) then makes the pixel stream slip: the picture is
+        // shifted and wraps around, and stays that way, because in that
+        // mode nothing detects the slip. With bounce buffers a late refill
+        // is counted by the driver, which restarts the stream on the next
+        // VSYNC by itself.
+        //
+        // This used to sit behind CONFIG_EXAMPLE_USE_BOUNCE_BUFFER, an
+        // option from the vendor example that this project never defines,
+        // so it was silently off.
         .bounce_buffer_size_px = 10 * EXAMPLE_LCD_H_RES,
-#endif
         .clk_src = LCD_CLK_SRC_DEFAULT,
         .disp_gpio_num = EXAMPLE_PIN_NUM_DISP_EN,
         .pclk_gpio_num = EXAMPLE_PIN_NUM_PCLK,

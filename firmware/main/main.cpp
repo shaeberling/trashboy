@@ -1240,6 +1240,8 @@ static void perf_display_sample(int64_t dt_us, bool in_game, int redrawn) {
 static void display_task(void *arg)
 {
   (void) arg;
+  // In GAME mode each pass starts at a VSYNC (see the end of the loop).
+  LCD_SetVsyncNotifyTask(xTaskGetCurrentTaskHandle());
   while (true) {
     if (g_ui_mode_req != g_ui_mode_cur) {
       if (g_ui_mode_req == UI_MODE_GAME) {
@@ -1296,13 +1298,26 @@ static void display_task(void *arg)
 #else
     (void) redrawn;
 #endif
-    // In a game, sleep a real tick (10 ms at CONFIG_FREERTOS_HZ=100): still
-    // up to 100 passes/s, several per panel refresh, but the task no longer
-    // spins re-taking the screen lock the Z80 needs for video-memory reads.
-    // Elsewhere keep the long-standing pdMS_TO_TICKS(5) — which is 0 ticks,
-    // i.e. just a yield — since the menu / input-test animations were tuned
-    // against that.
-    vTaskDelay(g_ui_mode_cur == UI_MODE_GAME ? 1 : pdMS_TO_TICKS(5));
+    if (g_ui_mode_cur == UI_MODE_GAME) {
+      // In a game, sleep until the panel's next VSYNC: the next pass then
+      // starts at the beginning of the vertical blanking, so render() writes
+      // the changed characters into the frame buffer before the panel scans
+      // them out. Writing at an arbitrary moment instead tore every moving
+      // object at the scan line (the panel takes ~45 ms per frame at its
+      // ~22 Hz refresh). One pass per panel frame is all the panel can show
+      // anyway. Updates bigger than the blanking can absorb (a full-screen
+      // redraw takes tens of ms) still tear.
+      //
+      // Drop a notification left over from earlier (menu mode, a slow pass)
+      // so we wait for a fresh VSYNC. The timeout only guards against the
+      // panel stopping.
+      ulTaskNotifyTake(pdTRUE, 0);
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+    } else {
+      // Long-standing pdMS_TO_TICKS(5), which is 0 ticks at 100 Hz, i.e.
+      // just a yield: the menu / input-test animations were tuned to it.
+      vTaskDelay(pdMS_TO_TICKS(5));
+    }
   }
 }
 

@@ -105,6 +105,13 @@ esp_err_t ST7701S_reset(void);// LCD Reset
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void LCD_Init(void);
 
+// Wake `task` (xTaskNotifyGive) at every VSYNC, i.e. at the start of the
+// vertical blanking, before the panel starts reading the next frame. A task
+// that writes the frame buffer right after waking (ulTaskNotifyTake) finishes
+// before the scan reaches its pixels, so its update shows whole instead of
+// torn. Pass NULL to stop.
+void LCD_SetVsyncNotifyTask(TaskHandle_t task);
+
 /********************* BackLight *********************/
 void Backlight_Init(void);
 void Set_Backlight(uint8_t Light);
