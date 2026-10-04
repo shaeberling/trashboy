@@ -1,4 +1,6 @@
 build/
+# The emulator tests that run on the build machine (test/host)
+build-host/
 sdkconfig.old
 log.*.txt
 tags
