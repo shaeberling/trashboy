@@ -26,6 +26,29 @@ this file is the working rules + hard-won gotchas.
 - Commit style: `firmware: <summary>` subject, body explains the why;
   don't commit `sdkconfig`, `.serial.log`, `scripts/serial-log*`.
 
+## Continuous integration and tests
+
+- `.github/workflows/ci.yml` runs on every push and pull request. It builds
+  the firmware three times (Waveshare; Waveshare with Mini TRS mode; Watcher)
+  in ESP-IDF's container and runs the emulator tests. The images are
+  artifacts of the run.
+- CI builds from a clean checkout and from the **sdkconfig defaults alone**:
+  `firmware/sdkconfig` is not used. A setting the firmware needs to build or
+  run must therefore be in `sdkconfig.defaults` (or `.esp32s3`), not only in
+  the local `sdkconfig`. The same build locally:
+  `idf.py -B build-ci -DIDF_TARGET=esp32s3 -DSDKCONFIG=build-ci/sdkconfig build`.
+- `firmware/test/host` tests the emulator core on the build machine, no
+  ESP32 needed: the firmware's own `z80.cpp`, `trs.cpp`, `trs_memory.cpp`
+  and `trs-keyboard.cpp` boot the Model III ROM into BASIC, take keyboard
+  reports, run a program and a CMD file, and the tests read the TRS-80's
+  screen. Run them with
+  `cmake -S firmware/test/host -B firmware/build-host && cmake --build firmware/build-host && ctest --test-dir firmware/build-host --output-on-failure`.
+  What those sources need from ESP-IDF and the rest of the firmware is in
+  `shims/` and `host.cpp` there (a screen that keeps the characters but
+  draws nothing, the ports without TRS-IO, NVS in memory): when one of them
+  uses something new from there, the test build says so and the stand-in
+  has to follow.
+
 ## Hardware map (Waveshare ESP32-S3-Touch-LCD-2.8B + custom carrier)
 
 - ESP32-S3R8: 8 MB **octal** PSRAM, 16 MB flash, 512 KB SRAM.

@@ -1,0 +1,118 @@
+# Every push and pull request:
+#
+# - the firmware builds, for each board and mode, from a clean checkout and
+#   from the sdkconfig defaults alone (firmware/sdkconfig is a developer's
+#   own and is not used);
+# - the emulator core passes its tests on the build machine
+#   (firmware/test/host): the Model III ROM boots into BASIC, takes keys and
+#   runs a program.
+#
+# The firmware images are kept as artifacts of the run.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  emulator:
+    name: Emulator tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        run: |
+          cmake -S firmware/test/host -B firmware/build-host
+          cmake --build firmware/build-host
+
+      - name: Test
+        run: ctest --test-dir firmware/build-host --output-on-failure
+
+  firmware:
+    name: Firmware (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    # The ESP-IDF version the firmware is developed with (see AGENTS.md)
+    container: espressif/idf:v6.0.1
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: waveshare
+            build: build
+          - variant: waveshare-mini-trs
+            build: build
+          - variant: watcher
+            # scripts/watcher.sh has its own
+            build: build-watcher
+    defaults:
+      run:
+        shell: bash
+        working-directory: firmware
+    steps:
+      - uses: actions/checkout@v7
+
+      # Only what the firmware compiles: TRS-IO with its libsmb2, and the
+      # RetroStore SDK. TRS-IO's other submodules (FabGL, ...) are for its
+      # own boards.
+      - name: Submodules
+        working-directory: .
+        run: |
+          git config --global --add safe.directory '*'
+          git submodule update --init --depth 1 \
+              firmware/components/trs-io/TRS-IO firmware/components/retrostore-c-sdk
+          git -C firmware/components/trs-io/TRS-IO submodule update --init --depth 1 \
+              src/esp/components/libsmb2
+
+      # The game the Watcher's image carries is not in the repository:
+      # scripts/watcher.sh downloads it from RetroStore if it is not there.
+      - name: Watcher's game
+        if: matrix.variant == 'watcher'
+        uses: actions/cache@v6
+        with:
+          path: firmware/main/watcher/breakdown.cmd
+          key: watcher-game-${{ hashFiles('firmware/scripts/watcher.sh') }}
+
+      - name: Build
+        run: |
+          . "$IDF_PATH/export.sh"
+          case "${{ matrix.variant }}" in
+          waveshare)
+              idf.py -B build -DIDF_TARGET=esp32s3 -DSDKCONFIG=build/sdkconfig build
+              ;;
+          waveshare-mini-trs)
+              mkdir -p build
+              echo "CONFIG_TRASHBOY_ENABLE_MINI_TRS_MODE=y" > build/sdkconfig.ci
+              idf.py -B build -DIDF_TARGET=esp32s3 -DSDKCONFIG=build/sdkconfig \
+                  "-DSDKCONFIG_DEFAULTS=sdkconfig.defaults;build/sdkconfig.ci" build
+              ;;
+          watcher)
+              sh scripts/watcher.sh build
+              ;;
+          esac
+
+      - name: Size
+        run: |
+          . "$IDF_PATH/export.sh"
+          {
+            echo "### Firmware (${{ matrix.variant }})"
+            echo '```'
+            idf.py -B ${{ matrix.build }} size
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: firmware-${{ matrix.variant }}
+          # (the Watcher has no html.bin)
+          path: |
+            firmware/${{ matrix.build }}/flash_args
+            firmware/${{ matrix.build }}/trashboy.bin
+            firmware/${{ matrix.build }}/html.bin
+            firmware/${{ matrix.build }}/bootloader/bootloader.bin
+            firmware/${{ matrix.build }}/partition_table/partition-table.bin
+          if-no-files-found: error
