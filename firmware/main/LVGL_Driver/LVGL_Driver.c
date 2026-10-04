@@ -57,10 +57,19 @@ void example_lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *p
     const int32_t src_h = lv_area_get_height(area);
 
     lv_area_t rot_area;
-    rot_area.x1 = area->y1;
-    rot_area.y1 = (EXAMPLE_LCD_V_RES - 1) - area->x2;
-    rot_area.x2 = area->y2;
-    rot_area.y2 = (EXAMPLE_LCD_V_RES - 1) - area->x1;
+    if (rotation == LV_DISPLAY_ROTATION_90) {
+        // CONFIG_TRASHBOY_DISPLAY_ROTATE_180: the 270 case below, turned
+        // 180 degrees on the panel (x -> H-1-x, y -> V-1-y).
+        rot_area.x1 = (EXAMPLE_LCD_H_RES - 1) - area->y2;
+        rot_area.y1 = area->x1;
+        rot_area.x2 = (EXAMPLE_LCD_H_RES - 1) - area->y1;
+        rot_area.y2 = area->x2;
+    } else {
+        rot_area.x1 = area->y1;
+        rot_area.y1 = (EXAMPLE_LCD_V_RES - 1) - area->x2;
+        rot_area.x2 = area->y2;
+        rot_area.y2 = (EXAMPLE_LCD_V_RES - 1) - area->x1;
+    }
 
     const uint32_t src_stride  = lv_draw_buf_width_to_stride((uint32_t) src_w, cf);
     const uint32_t dest_stride = lv_draw_buf_width_to_stride((uint32_t) src_h, cf);
@@ -128,7 +137,7 @@ void LVGL_Init(void)
     // Tell LVGL the display is landscape. Pixel rotation happens in the
     // flush callback (lv_draw_sw_rotate), since the RGB panel has no
     // hardware rotation.
-    lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_270);
+    lv_display_set_rotation(disp, TRASHBOY_MENU_ROTATION);
 
     ESP_LOGI(LVGL_TAG, "Install LVGL tick timer");
     const esp_timer_create_args_t lvgl_tick_timer_args = {

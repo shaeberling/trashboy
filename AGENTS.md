@@ -341,6 +341,10 @@ constants in `watcher_main.cpp` are first guesses that have not been tuned.
   the web address on the right; selects `TRASHBOY_BT_AUTO_PAIR`; boots the
   TRS-80 ROM as soon as the BT keyboard is connected. Internal RAM gets very
   tight in this mode — largest free block measured 3-7 KB)
+- `TRASHBOY_DISPLAY_ROTATE_180` (board mounted the other way up: menus at
+  ROTATION_90 instead of 270, `TRASHBOY_MENU_ROTATION` in LVGL_Driver.h;
+  TRSCanvas mirrors the emulator screen. The in-game on-screen keyboard is
+  NOT turned; used with Mini TRS mode on a board whose touch isn't used)
 - `TRASHBOY_WIFI_USE_PRESET` + SSID/password (dev-only; lives in sdkconfig)
 - `TRASHBOY_SOUND_DIAG` (audio test tone + telemetry)
 - `TRASHBOY_PERF_DIAG` (two `perf` log lines per second during a game:

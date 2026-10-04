@@ -58,6 +58,16 @@ config TRASHBOY_ENABLE_MINI_TRS_MODE
         boots the TRS-80 ROM, with no game loaded, instead of showing the
         main menu. Page Up leaves the TRS-80 for the menu as usual.
 
+config TRASHBOY_DISPLAY_ROTATE_180
+    bool "Turn the picture 180 degrees"
+    default n
+    help
+      For a board mounted the other way up in its case: the menus and the
+      TRS-80 screen are drawn upside down relative to the default. Touch
+      input follows (LVGL applies the rotation), but the on-screen
+      keyboard is still laid out for the default orientation: meant for
+      boards without touch, such as Mini TRS mode's.
+
 config TRASHBOY_WIFI_USE_PRESET
     bool "Use preset Wi-Fi credentials instead of the interactive dialog"
     default n

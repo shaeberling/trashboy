@@ -1645,7 +1645,7 @@ static void display_task(void *arg)
         // (rotated landscape). The splash widgets survived underneath the
         // canvas; a full invalidate repaints them through the sw-rotate path.
         trs_screen.setVisible(false);
-        lv_display_set_rotation(lv_display_get_default(), LV_DISPLAY_ROTATION_270);
+        lv_display_set_rotation(lv_display_get_default(), TRASHBOY_MENU_ROTATION);
         lv_obj_invalidate(lv_scr_act());
       }
       g_ui_mode_cur = g_ui_mode_req;

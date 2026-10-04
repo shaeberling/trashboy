@@ -62,6 +62,13 @@ public:
 
 class TRSCanvas {
 private:
+  // CONFIG_TRASHBOY_DISPLAY_ROTATE_180: draw the screen the other way up.
+#if CONFIG_TRASHBOY_DISPLAY_ROTATE_180
+  static constexpr bool kRotate180 = true;
+#else
+  static constexpr bool kRotate180 = false;
+#endif
+
   // Canvas pixel buffer (RGB565)
   lv_color16_t *canvas_buf;
   lv_coord_t canvas_width = 0;  // Actual canvas/display width (stride)
@@ -142,6 +149,15 @@ public:
     area->x2 = area->x1 + 2 * font_height - 1;
     area->y2 = canvas_height - 1 - cell_x * font_width - offset_y;
     area->y1 = area->y2 - (font_width - 1);
+    if (kRotate180) {
+      // CONFIG_TRASHBOY_DISPLAY_ROTATE_180: the same cell, mirrored on both
+      // native axes.
+      const lv_area_t a = *area;
+      area->x1 = canvas_width - 1 - a.x2;
+      area->x2 = canvas_width - 1 - a.x1;
+      area->y1 = canvas_height - 1 - a.y2;
+      area->y2 = canvas_height - 1 - a.y1;
+    }
     return true;
   }
 
@@ -161,11 +177,22 @@ public:
     // Original column 7 (rightmost) → rotated row 0 (top)
     for (int col = 0; col < font_width; col++) {
         uint16_t pat = glyph_bits(ch, col);
+        lv_color16_t *pattern = col_lut[pat];
+
+        if (kRotate180) {
+          // Turned 180 degrees: the glyph's columns run top to bottom and
+          // each row is written right to left.
+          lv_color16_t *dst = buf + ((a.y1 + col) * canvas_width + a.x1);
+          for (int i = font_height - 1; i >= 0; i--) {
+              *dst++ = pattern[i];
+              *dst++ = pattern[i];
+          }
+          continue;
+        }
 
         // Destination: start of the rotated row (which came from original column)
         // These 2 x 12 pixels are contiguous in the buffer
         lv_color16_t *dst = buf + ((a.y2 - col) * canvas_width + a.x1);
-        lv_color16_t *pattern = col_lut[pat];
         for(int i = 0; i < font_height; i++) {
             *dst++ = *pattern;
             *dst++ = *pattern++;
