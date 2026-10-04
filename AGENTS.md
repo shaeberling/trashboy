@@ -250,14 +250,19 @@ restarted stream is as fragile as a freshly booted one.
 - `init_io()` (FreHD state init) was never called before this; z80_task
   now calls it, then `flash_disk_mount()`.
 
-## TRS-IO (submodule, upstream master)
+## TRS-IO (submodule, branch trashboy on idf-v6)
 
-- `components/trs-io/TRS-IO` is apuder/TRS-IO, branch `trashboy`:
-  upstream `master` with our commits on top (Arno's forks of libsmb2 and
-  retrostore-c-sdk, IDF v6 fixes, `init_trs_fs_local()`). Keep TrashBoy
-  changes there, never on `master`: PocketTRS and TRS-IO's boards build
-  `master` on an older IDF. To update, rebase `trashboy` onto
-  `origin/master` and force-push it (with `--force-with-lease`).
+- `components/trs-io/TRS-IO` is apuder/TRS-IO, branch `trashboy`: branch
+  `idf-v6` with TrashBoy's commits on top (`init_trs_fs_local()`, no
+  `frehd/CMakeLists.txt`). `idf-v6` is upstream `master` with what IDF v6
+  needs (Arno's fork of libsmb2, the IDF v6 fixes) and what TrashBoy shares
+  with PocketTRS, which builds `idf-v6` itself: a hook for requests of the
+  host firmware in the web server, Bluetooth keyboard pairing in the web
+  UI. Changes for both go on `idf-v6`, TrashBoy-only ones on `trashboy`,
+  nothing on `master`: TRS-IO's boards build `master` on an older IDF.
+  `idf-v6` is not rebased (PocketTRS pins its commits). To update, rebase
+  `trashboy` onto `origin/idf-v6` and force-push it (with
+  `--force-with-lease`).
   Upstream is the firmware for TRS-IO's own boards (FPGA over SPI, LEDs,
   PS/2 keyboard): its `src/esp/main` is not built. The wrapper
   `components/trs-io/CMakeLists.txt` compiles the library parts (trs-io,
