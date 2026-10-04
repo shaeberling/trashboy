@@ -108,4 +108,9 @@ add_custom_command(OUTPUT "${html_dir}/index.html.gz"
                    DEPENDS ${html_files}
                    VERBATIM)
 add_custom_target(trs_io_html DEPENDS "${html_dir}/index.html.gz")
-spiffs_create_partition_image(html "${html_dir}" FLASH_IN_PROJECT DEPENDS trs_io_html)
+# Only for a board whose partition table has the partition: the SenseCAP
+# Watcher's does not (it runs one game, without TRS-IO's network services).
+partition_table_get_partition_info(html_partition_size "--partition-name html" "size")
+if(html_partition_size)
+    spiffs_create_partition_image(html "${html_dir}" FLASH_IN_PROJECT DEPENDS trs_io_html)
+endif()
